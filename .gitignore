@@ -1,0 +1,12 @@
+/.direnv/
+/result
+/target/
+/dist/
+/node_modules/
+
+# Environment files
+.env
+.env.*
+
+# Editor / OS noise
+.DS_Store
