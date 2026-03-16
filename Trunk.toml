@@ -1,0 +1,11 @@
+[build]
+dist = "dist"
+target = "crates/fedigents-web/index.html"
+
+[watch]
+watch = ["crates/fedigents-web", "public", "skills"]
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+open = false

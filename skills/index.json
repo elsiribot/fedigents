@@ -1,0 +1,8 @@
+[
+  {
+    "slug": "gift-cards",
+    "title": "Buy gift cards with Bitcoin",
+    "summary": "Guide the user through choosing a merchant, confirming terms, and paying a Lightning invoice.",
+    "path": "/skills/gift-cards.md"
+  }
+]

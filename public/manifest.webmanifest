@@ -1,0 +1,17 @@
+{
+  "name": "Fedigents",
+  "short_name": "Fedigents",
+  "display": "standalone",
+  "start_url": "/",
+  "background_color": "#f4efe3",
+  "theme_color": "#10261c",
+  "description": "A chat-first Fedimint wallet PWA.",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
