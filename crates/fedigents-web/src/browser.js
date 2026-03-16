@@ -9,7 +9,8 @@ export async function openWalletDb(fileName) {
 
 export async function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
-    await navigator.serviceWorker.register("/sw.js");
+    const url = new URL("sw.js", window.location.href);
+    await navigator.serviceWorker.register(url.pathname);
   }
 }
 
