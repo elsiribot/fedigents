@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$ROOT_DIR/.playwright-mcp}"
+USER_DATA_DIR="${PLAYWRIGHT_MCP_USER_DATA_DIR:-$OUTPUT_DIR/profile}"
+
+mkdir -p "$OUTPUT_DIR" "$USER_DATA_DIR"
+
+browser_path="${PLAYWRIGHT_BROWSER_EXECUTABLE_PATH:-}"
+browser_name="${PLAYWRIGHT_MCP_BROWSER:-}"
+
+if [[ -z "$browser_path" ]]; then
+  for candidate in chromium chromium-browser google-chrome-stable google-chrome firefox; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      browser_path="$(command -v "$candidate")"
+      case "$candidate" in
+        firefox)
+          browser_name="${browser_name:-firefox}"
+          ;;
+        *)
+          browser_name="${browser_name:-chrome}"
+          ;;
+      esac
+      break
+    fi
+  done
+fi
+
+if [[ -z "$browser_path" ]]; then
+  cat <<'EOF' >&2
+No system browser was found for Playwright MCP.
+
+Enter the Nix dev shell or set PLAYWRIGHT_BROWSER_EXECUTABLE_PATH to a
+system-provided Chromium or Firefox binary.
+EOF
+  exit 1
+fi
+
+if [[ -x "$ROOT_DIR/node_modules/.bin/mcp-server-playwright" ]]; then
+  mcp_cmd=("$ROOT_DIR/node_modules/.bin/mcp-server-playwright")
+elif [[ -x "$ROOT_DIR/node_modules/.bin/playwright-mcp" ]]; then
+  mcp_cmd=("$ROOT_DIR/node_modules/.bin/playwright-mcp")
+elif [[ -f "$ROOT_DIR/node_modules/@playwright/mcp/cli.js" ]]; then
+  mcp_cmd=(node "$ROOT_DIR/node_modules/@playwright/mcp/cli.js")
+else
+  cat <<'EOF' >&2
+Playwright MCP is not installed yet.
+
+Run `nix develop -c npm install` from the repo root first.
+EOF
+  exit 1
+fi
+
+exec "${mcp_cmd[@]}" \
+  --headless \
+  --browser "$browser_name" \
+  --executable-path "$browser_path" \
+  --block-service-workers \
+  --output-dir "$OUTPUT_DIR" \
+  --save-session \
+  --save-trace \
+  --user-data-dir "$USER_DATA_DIR" \
+  --viewport-size 1440x1100 \
+  "$@"

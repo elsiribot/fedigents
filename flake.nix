@@ -25,6 +25,7 @@
             cargo-leptos
             cargo-nextest
             clang
+            chromium
             just
             leptosfmt
             nodejs_22
@@ -39,11 +40,13 @@
           ];
 
           env = {
+            PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
             RUST_BACKTRACE = "1";
           };
 
           shellHook = ''
             export PATH="$PWD/node_modules/.bin:$PATH"
+            export PLAYWRIGHT_BROWSER_EXECUTABLE_PATH="${pkgs.chromium}/bin/chromium"
 
             cat <<'EOF'
             Leptos + Fedimint dev shell ready.
@@ -52,6 +55,8 @@
               cargo leptos watch
               trunk serve
               cargo nextest run
+              npm install
+              npm run playwright:mcp:help
             EOF
           '';
         };

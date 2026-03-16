@@ -3,6 +3,7 @@
 /target/
 /dist/
 /node_modules/
+/.playwright-mcp/
 
 # Environment files
 .env

@@ -1,0 +1,12 @@
+{
+  "name": "fedigents",
+  "private": true,
+  "scripts": {
+    "playwright:mcp": "./scripts/playwright-mcp",
+    "playwright:mcp:help": "./scripts/playwright-mcp --help",
+    "playwright:smoke": "./scripts/playwright-mcp --help"
+  },
+  "devDependencies": {
+    "@playwright/mcp": "0.0.44"
+  }
+}
