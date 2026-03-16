@@ -231,10 +231,13 @@ fn build_messages(history: &[ChatMessage], skills: &[SkillSummary]) -> Vec<PpqMe
             ChatRole::System => "system",
             ChatRole::User => "user",
             ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "tool",
+            ChatRole::Tool => "assistant",
         }
         .to_owned(),
-        content: message.body.clone(),
+        content: match message.role {
+            ChatRole::Tool => format!("Tool result: {}", message.body),
+            _ => message.body.clone(),
+        },
     }));
 
     messages

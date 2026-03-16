@@ -100,8 +100,13 @@ impl PpqClient {
                 "temperature": 0.2
             }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_else(|_| "<unreadable response body>".to_owned());
+            anyhow::bail!("PPQ chat error {status}: {body}");
+        }
 
         let body: Value = response.json().await?;
         let content = body
