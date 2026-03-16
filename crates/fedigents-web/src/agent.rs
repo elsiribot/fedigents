@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use web_sys::window;
 
 use crate::fedimint::WalletRuntime;
 use crate::ppq::{PpqClient, PpqMessage};
@@ -188,7 +189,11 @@ impl WalletAgent {
                     .find(|skill| skill.slug == slug)
                     .ok_or_else(|| anyhow::anyhow!("Unknown skill: {slug}"))?;
                 if let Some(path) = &skill.path {
-                    let body = reqwest::get(path).await?.error_for_status()?.text().await?;
+                    let body = reqwest::get(&asset_url(path)?)
+                        .await?
+                        .error_for_status()?
+                        .text()
+                        .await?;
                     Ok(ToolOutcome::Message(body))
                 } else {
                     Ok(ToolOutcome::Message(serde_json::to_string(skill)?))
@@ -280,8 +285,41 @@ fn read_u64(value: &serde_json::Value, key: &str) -> anyhow::Result<u64> {
 }
 
 pub async fn load_skills() -> anyhow::Result<Vec<SkillSummary>> {
-    let response = reqwest::get("skills/index.json").await?.error_for_status()?;
+    let response = reqwest::get(&asset_url("skills/index.json")?)
+        .await?
+        .error_for_status()?;
     Ok(response.json().await?)
+}
+
+fn asset_url(path: &str) -> anyhow::Result<String> {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return Ok(path.to_owned());
+    }
+
+    let window = window().ok_or_else(|| anyhow::anyhow!("window is unavailable"))?;
+    let origin = window
+        .location()
+        .origin()
+        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))?;
+    let pathname = window
+        .location()
+        .pathname()
+        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))?;
+    let mut base_path = if pathname.ends_with('/') {
+        pathname
+    } else {
+        match pathname.rfind('/') {
+            Some(idx) => pathname[..=idx].to_owned(),
+            None => "/".to_owned(),
+        }
+    };
+
+    if !base_path.starts_with('/') {
+        base_path.insert(0, '/');
+    }
+
+    let clean = path.trim_start_matches('/');
+    Ok(format!("{origin}{base_path}{clean}"))
 }
 
 pub fn onboarding_message(body: impl Into<String>) -> ChatMessage {

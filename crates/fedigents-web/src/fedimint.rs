@@ -184,15 +184,37 @@ impl WalletRuntime {
             return Ok(());
         }
 
-        let receive_code = self.ensure_receive_code(&client).await?;
-        on_event(BootstrapEvent::ReceiveCode(receive_code.lnurl.clone()));
+        let receive_code = match self.ensure_receive_code(&client).await {
+            Ok(receive_code) => {
+                on_event(BootstrapEvent::ReceiveCode(receive_code.lnurl.clone()));
+                Some(receive_code)
+            }
+            Err(err) => {
+                on_event(BootstrapEvent::Note(format!(
+                    "LNURL receive setup is unavailable in this federation right now ({err}). Falling back to a starter invoice."
+                )));
+                None
+            }
+        };
 
         if balance.msats == 0 {
-            on_event(BootstrapEvent::Note(
-                "Wallet joined. Waiting for the first LNURL deposit before funding PPQ.".to_owned(),
-            ));
-            self.wait_for_first_deposit(&client, receive_code.payment_code_idx, &mut on_event)
-                .await?;
+            if let Some(receive_code) = receive_code {
+                on_event(BootstrapEvent::Note(
+                    "Wallet joined. Waiting for the first LNURL deposit before funding PPQ.".to_owned(),
+                ));
+                self.wait_for_first_deposit(&client, receive_code.payment_code_idx, &mut on_event)
+                    .await?;
+            } else {
+                let (operation_id, invoice) = self
+                    .create_invoice_internal(&client, 1_000, "Initial Fedigents funding")
+                    .await?;
+                on_event(BootstrapEvent::Note(
+                    "Paste this starter BOLT11 invoice into your wallet and pay it to continue setup:".to_owned(),
+                ));
+                on_event(BootstrapEvent::Note(invoice.to_string()));
+                self.wait_for_first_invoice_deposit(&client, operation_id, &mut on_event)
+                    .await?;
+            }
         } else {
             on_event(BootstrapEvent::Note(
                 "Existing wallet balance detected. Continuing with PPQ funding.".to_owned(),
@@ -282,19 +304,8 @@ impl WalletRuntime {
         description: &str,
     ) -> anyhow::Result<InvoiceResponse> {
         let client = self.ensure_client().await?;
-        let ln = client.get_first_module::<LightningClientModule>()?.inner();
-        let gateway = ln.get_gateway(None::<PublicKey>, false).await?;
-        let amount = Amount::from_sats(amount_sats);
-        let (operation_id, invoice, _) = ln
-            .create_bolt11_invoice(
-                amount,
-                lightning_invoice::Bolt11InvoiceDescription::Direct(
-                    lightning_invoice::Description::new(description.to_owned())?,
-                ),
-                None,
-                (),
-                gateway,
-            )
+        let (operation_id, invoice) = self
+            .create_invoice_internal(&client, amount_sats, description)
             .await?;
 
         Ok(InvoiceResponse {
@@ -628,6 +639,60 @@ impl WalletRuntime {
             }
         }
         Ok(false)
+    }
+
+    async fn create_invoice_internal(
+        &self,
+        client: &Rc<ClientHandle>,
+        amount_sats: u64,
+        description: &str,
+    ) -> anyhow::Result<(OperationId, lightning_invoice::Bolt11Invoice)> {
+        let ln = client.get_first_module::<LightningClientModule>()?.inner();
+        let gateway = ln.get_gateway(None::<PublicKey>, false).await?;
+        let amount = Amount::from_sats(amount_sats);
+        let (operation_id, invoice, _) = ln
+            .create_bolt11_invoice(
+                amount,
+                lightning_invoice::Bolt11InvoiceDescription::Direct(
+                    lightning_invoice::Description::new(description.to_owned())?,
+                ),
+                None,
+                (),
+                gateway,
+            )
+            .await?;
+        Ok((operation_id, invoice))
+    }
+
+    async fn wait_for_first_invoice_deposit<F>(
+        &self,
+        client: &Rc<ClientHandle>,
+        operation_id: OperationId,
+        on_event: &mut F,
+    ) -> anyhow::Result<()>
+    where
+        F: FnMut(BootstrapEvent),
+    {
+        let ln = client.get_first_module::<LightningClientModule>()?.inner();
+        let mut updates = ln.subscribe_ln_receive(operation_id).await?.into_stream();
+        while let Some(update) = updates.next().await {
+            match update {
+                LnReceiveState::Claimed => {
+                    on_event(BootstrapEvent::Note(
+                        "First deposit received and claimed.".to_owned(),
+                    ));
+                    return Ok(());
+                }
+                LnReceiveState::Canceled { reason } => {
+                    return Err(anyhow::anyhow!("Starter invoice canceled: {reason:?}"));
+                }
+                _ => {}
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Starter invoice stream ended before a settled payment"
+        ))
     }
 }
 
