@@ -280,7 +280,7 @@ fn read_u64(value: &serde_json::Value, key: &str) -> anyhow::Result<u64> {
 }
 
 pub async fn load_skills() -> anyhow::Result<Vec<SkillSummary>> {
-    let response = reqwest::get("/skills/index.json").await?.error_for_status()?;
+    let response = reqwest::get("skills/index.json").await?.error_for_status()?;
     Ok(response.json().await?)
 }
 

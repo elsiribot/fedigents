@@ -73,6 +73,10 @@ pub fn App() -> impl IntoView {
                 }
             };
 
+            if let Some(notice) = wallet.storage_notice() {
+                push_message(&messages, onboarding_message(notice));
+            }
+
             runtime_cell.borrow_mut().replace(wallet.clone());
 
             let bootstrap_result = wallet

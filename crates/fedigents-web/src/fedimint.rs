@@ -10,6 +10,7 @@ use fedimint_connectors::ConnectorRegistry;
 use fedimint_core::Amount;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
+use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::invite_code::InviteCode;
@@ -122,6 +123,7 @@ pub struct WalletRuntime {
     database: Database,
     app_state: Database,
     client: Rc<RefCell<Option<Rc<ClientHandle>>>>,
+    storage_notice: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,9 +141,19 @@ pub struct InvoiceResponse {
 
 impl WalletRuntime {
     pub async fn connect() -> anyhow::Result<Self> {
-        let handle = browser::open_wallet_handle(DB_FILE).await?;
-        let cursed_db = MemAndRedb::new(handle)?;
-        let database = Database::new(cursed_db, Default::default());
+        let (database, storage_notice) = match browser::open_wallet_handle(DB_FILE).await {
+            Ok(handle) => {
+                let cursed_db = MemAndRedb::new(handle)?;
+                (Database::new(cursed_db, Default::default()), None)
+            }
+            Err(err) => {
+                let notice = format!(
+                    "Persistent wallet storage is unavailable in this browser session ({err}). Falling back to in-memory mode. Your wallet state will reset when this tab closes."
+                );
+                (Database::new(MemDatabase::new(), Default::default()), Some(notice))
+            }
+        };
+
         let app_state = database.with_prefix(APP_STATE_DB_PREFIX.to_vec());
         let connectors = ConnectorRegistry::build_from_client_defaults().bind().await?;
         let runtime = Self {
@@ -149,10 +161,15 @@ impl WalletRuntime {
             database,
             app_state,
             client: Rc::new(RefCell::new(None)),
+            storage_notice,
         };
 
         runtime.migrate_legacy_local_storage().await?;
         Ok(runtime)
+    }
+
+    pub fn storage_notice(&self) -> Option<String> {
+        self.storage_notice.clone()
     }
 
     pub async fn bootstrap<F>(&self, mut on_event: F) -> anyhow::Result<()>

@@ -4,6 +4,11 @@ let currentTimer = null;
 export async function openWalletDb(fileName) {
   const root = await navigator.storage.getDirectory();
   const handle = await root.getFileHandle(fileName, { create: true });
+  if (typeof handle.createSyncAccessHandle !== "function") {
+    throw new Error(
+      "This browser does not support OPFS Sync Access Handles. Use a recent Chromium-based browser for wallet storage."
+    );
+  }
   return await handle.createSyncAccessHandle();
 }
 
