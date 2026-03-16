@@ -48,6 +48,22 @@
             export PATH="$PWD/node_modules/.bin:$PATH"
             export PLAYWRIGHT_BROWSER_EXECUTABLE_PATH="${pkgs.chromium}/bin/chromium"
 
+            export CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS='--cfg getrandom_backend="wasm_js"'
+
+            CLANG_UNWRAPPED="$(which -a clang | sed -n '2p')"
+            CLANGXX_UNWRAPPED="$(which -a clang++ | sed -n '2p')"
+
+            if [ -z "$CLANG_UNWRAPPED" ]; then
+              CLANG_UNWRAPPED="$(command -v clang)"
+            fi
+            if [ -z "$CLANGXX_UNWRAPPED" ]; then
+              CLANGXX_UNWRAPPED="$(command -v clang++)"
+            fi
+
+            export CC_wasm32_unknown_unknown="$CLANG_UNWRAPPED"
+            export CXX_wasm32_unknown_unknown="$CLANGXX_UNWRAPPED"
+            export AR_wasm32_unknown_unknown="ar"
+
             cat <<'EOF'
             Leptos + Fedimint dev shell ready.
 
