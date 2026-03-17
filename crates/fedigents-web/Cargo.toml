@@ -40,16 +40,19 @@ web-sys = { version = "0.3.77", features = [
   "FileSystemFileHandle",
   "FileSystemSyncAccessHandle",
   "FileSystemDirectoryHandle",
+  "DedicatedWorkerGlobalScope",
   "HtmlInputElement",
   "HtmlTextAreaElement",
   "HtmlVideoElement",
+  "MessageEvent",
   "MediaDevices",
   "MediaStream",
   "MediaStreamTrack",
   "Navigator",
   "ServiceWorkerContainer",
   "StorageManager",
-  "Window"
+  "Window",
+  "Worker"
 ] }
 
 [lints]

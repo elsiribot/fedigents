@@ -1,6 +1,21 @@
 let currentStream = null;
 let currentTimer = null;
 
+export function createWalletWorker() {
+  const url = new URL("wallet-worker.js", self.location.href);
+  return new Worker(url, {
+    type: "module",
+    name: "fedigents-wallet"
+  });
+}
+
+export function supportsSyncAccessHandles() {
+  return (
+    typeof FileSystemFileHandle !== "undefined" &&
+    typeof FileSystemFileHandle.prototype?.createSyncAccessHandle === "function"
+  );
+}
+
 export async function openWalletDb(fileName) {
   const root = await navigator.storage.getDirectory();
   const handle = await root.getFileHandle(fileName, { create: true });

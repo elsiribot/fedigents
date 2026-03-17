@@ -1,6 +1,6 @@
 use js_sys::{Function, Promise};
 use wasm_bindgen::prelude::*;
-use web_sys::{FileSystemSyncAccessHandle, HtmlVideoElement};
+use web_sys::{FileSystemSyncAccessHandle, HtmlVideoElement, Worker};
 
 #[wasm_bindgen(module = "/src/browser.js")]
 extern "C" {
@@ -14,10 +14,19 @@ extern "C" {
     pub fn copy_text(value: &str) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_name = startQrScanner)]
-    pub fn start_qr_scanner(video: &HtmlVideoElement, callback: &Function) -> Result<Promise, JsValue>;
+    pub fn start_qr_scanner(
+        video: &HtmlVideoElement,
+        callback: &Function,
+    ) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_name = stopQrScanner)]
     pub fn stop_qr_scanner(video: &HtmlVideoElement) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = createWalletWorker)]
+    pub fn create_wallet_worker() -> Result<Worker, JsValue>;
+
+    #[wasm_bindgen(js_name = supportsSyncAccessHandles)]
+    pub fn supports_sync_access_handles_js() -> bool;
 }
 
 pub async fn open_wallet_handle(file_name: &str) -> anyhow::Result<FileSystemSyncAccessHandle> {
@@ -26,6 +35,18 @@ pub async fn open_wallet_handle(file_name: &str) -> anyhow::Result<FileSystemSyn
         .await
         .map_err(js_error)?;
     Ok(value.unchecked_into())
+}
+
+pub fn spawn_wallet_worker() -> anyhow::Result<Worker> {
+    create_wallet_worker().map_err(js_error)
+}
+
+pub fn supports_sync_access_handles() -> bool {
+    supports_sync_access_handles_js()
+}
+
+pub fn is_worker_context() -> bool {
+    web_sys::window().is_none()
 }
 
 pub async fn ensure_service_worker() -> anyhow::Result<()> {
@@ -44,10 +65,7 @@ pub async fn copy_to_clipboard(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn begin_qr_scanner(
-    video: &HtmlVideoElement,
-    callback: &Function,
-) -> anyhow::Result<()> {
+pub async fn begin_qr_scanner(video: &HtmlVideoElement, callback: &Function) -> anyhow::Result<()> {
     let promise = start_qr_scanner(video, callback).map_err(js_error)?;
     wasm_bindgen_futures::JsFuture::from(promise)
         .await

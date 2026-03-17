@@ -7,17 +7,17 @@ use fedimint_bip39::{Bip39RootSecretStrategy, Language, Mnemonic};
 use fedimint_client::secret::RootSecretStrategy;
 use fedimint_client::{Client, ClientHandle, RootSecret};
 use fedimint_connectors::ConnectorRegistry;
-use fedimint_core::Amount;
 use fedimint_core::config::FederationId;
 use fedimint_core::core::OperationId;
 use fedimint_core::db::mem_impl::MemDatabase;
 use fedimint_core::db::{Database, IDatabaseTransactionOpsCoreTyped};
 use fedimint_core::encoding::{Decodable, Encodable};
-use fedimint_core::invite_code::InviteCode;
 use fedimint_core::impl_db_record;
+use fedimint_core::invite_code::InviteCode;
 use fedimint_core::secp256k1::PublicKey;
 use fedimint_core::task::sleep;
 use fedimint_core::util::SafeUrl;
+use fedimint_core::Amount;
 use fedimint_cursed_redb::MemAndRedb;
 use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_eventlog::EventLogId;
@@ -118,7 +118,7 @@ pub struct ReceiveCode {
 }
 
 #[derive(Clone)]
-pub struct WalletRuntime {
+pub(crate) struct WalletRuntimeCore {
     connectors: ConnectorRegistry,
     database: Database,
     app_state: Database,
@@ -139,7 +139,7 @@ pub struct InvoiceResponse {
     pub invoice: String,
 }
 
-impl WalletRuntime {
+impl WalletRuntimeCore {
     pub async fn connect() -> anyhow::Result<Self> {
         let (database, storage_notice) = match browser::open_wallet_handle(DB_FILE).await {
             Ok(handle) => {
@@ -147,15 +147,25 @@ impl WalletRuntime {
                 (Database::new(cursed_db, Default::default()), None)
             }
             Err(err) => {
+                if browser::supports_sync_access_handles() {
+                    return Err(anyhow::anyhow!(
+                        "Persistent OPFS storage initialization failed in a SyncAccessHandle-capable browser: {err}"
+                    ));
+                }
                 let notice = format!(
                     "Persistent wallet storage is unavailable in this browser session ({err}). Falling back to in-memory mode. Your wallet state will reset when this tab closes."
                 );
-                (Database::new(MemDatabase::new(), Default::default()), Some(notice))
+                (
+                    Database::new(MemDatabase::new(), Default::default()),
+                    Some(notice),
+                )
             }
         };
 
         let app_state = database.with_prefix(APP_STATE_DB_PREFIX.to_vec());
-        let connectors = ConnectorRegistry::build_from_client_defaults().bind().await?;
+        let connectors = ConnectorRegistry::build_from_client_defaults()
+            .bind()
+            .await?;
         let runtime = Self {
             connectors,
             database,
@@ -200,7 +210,8 @@ impl WalletRuntime {
         if balance.msats == 0 {
             if let Some(receive_code) = receive_code {
                 on_event(BootstrapEvent::Note(
-                    "Wallet joined. Waiting for the first LNURL deposit before funding PPQ.".to_owned(),
+                    "Wallet joined. Waiting for the first LNURL deposit before funding PPQ."
+                        .to_owned(),
                 ));
                 self.wait_for_first_deposit(&client, receive_code.payment_code_idx, &mut on_event)
                     .await?;
@@ -228,7 +239,8 @@ impl WalletRuntime {
 
     pub async fn mark_ppq_ready(&self) -> anyhow::Result<()> {
         let mut dbtx = self.app_state.begin_transaction().await;
-        dbtx.insert_entry(&PpqReadyStateKey, &PpqReadyStateValue(true)).await;
+        dbtx.insert_entry(&PpqReadyStateKey, &PpqReadyStateValue(true))
+            .await;
         dbtx.insert_entry(
             &PpqFundingInFlightStateKey,
             &PpqFundingInFlightStateValue(false),
@@ -262,11 +274,12 @@ impl WalletRuntime {
         self.read_app_state(&PpqAccountStateKey).await
     }
 
-    pub async fn ensure_ppq_account(&self, ppq: &PpqClient) -> anyhow::Result<PpqAccount> {
+    pub async fn ensure_ppq_account(&self) -> anyhow::Result<PpqAccount> {
         if let Some(account) = self.ppq_account().await? {
             return Ok(account);
         }
 
+        let ppq = PpqClient::new();
         let account = ppq.create_account().await?;
         self.write_app_state(&PpqAccountStateKey, &account).await?;
         Ok(account)
@@ -288,13 +301,15 @@ impl WalletRuntime {
         .await
     }
 
-    pub async fn repair_ppq_account(&self, ppq: &PpqClient) -> anyhow::Result<PpqAccount> {
+    pub async fn repair_ppq_account(&self) -> anyhow::Result<PpqAccount> {
         if let Some(account) = self.ppq_account().await? {
             return Ok(account);
         }
 
+        let ppq = PpqClient::new();
         let replacement = ppq.create_account().await?;
-        self.write_app_state(&PpqAccountStateKey, &replacement).await?;
+        self.write_app_state(&PpqAccountStateKey, &replacement)
+            .await?;
         Ok(replacement)
     }
 
@@ -327,7 +342,10 @@ impl WalletRuntime {
 
     pub async fn list_operations(&self, limit: usize) -> anyhow::Result<String> {
         let client = self.ensure_client().await?;
-        let operations = client.operation_log().paginate_operations_rev(limit, None).await;
+        let operations = client
+            .operation_log()
+            .paginate_operations_rev(limit, None)
+            .await;
         Ok(serde_json::to_string_pretty(&operations)?)
     }
 
@@ -344,9 +362,10 @@ impl WalletRuntime {
                 .await
                 .ok_or_else(|| anyhow::anyhow!("Client config not found in database"))?
                 .calculate_federation_id();
-            let root_secret = RootSecret::StandardDoubleDerive(
-                derive_federation_secret(&mnemonic, &federation_id),
-            );
+            let root_secret = RootSecret::StandardDoubleDerive(derive_federation_secret(
+                &mnemonic,
+                &federation_id,
+            ));
             Rc::new(
                 builder
                     .open(self.connectors.clone(), self.database.clone(), root_secret)
@@ -356,9 +375,10 @@ impl WalletRuntime {
             info!("Joining federation for the first time");
             let invite = InviteCode::from_str(DEFAULT_INVITE_CODE)?;
             let federation_id = invite.federation_id();
-            let root_secret = RootSecret::StandardDoubleDerive(
-                derive_federation_secret(&mnemonic, &federation_id),
-            );
+            let root_secret = RootSecret::StandardDoubleDerive(derive_federation_secret(
+                &mnemonic,
+                &federation_id,
+            ));
             let preview = builder.preview(self.connectors.clone(), &invite).await?;
             Rc::new(preview.join(self.database.clone(), root_secret).await?)
         };
@@ -386,7 +406,11 @@ impl WalletRuntime {
         }
 
         let mnemonic = Bip39RootSecretStrategy::<12>::random(&mut thread_rng());
-        let words = mnemonic.words().map(|word| word.to_string()).collect::<Vec<_>>().join(" ");
+        let words = mnemonic
+            .words()
+            .map(|word| word.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
         self.write_app_state(&MnemonicStateKey, &MnemonicStateValue(words))
             .await?;
         Ok(mnemonic)
@@ -410,11 +434,16 @@ impl WalletRuntime {
             }
         } else {
             let recurringd_api = self.lookup_recurringd_api(client).await?;
-            let meta = serde_json::to_string(&serde_json::json!([
-                ["text/plain", "Deposit into your Fedigents wallet"]
-            ]))?;
+            let meta = serde_json::to_string(&serde_json::json!([[
+                "text/plain",
+                "Deposit into your Fedigents wallet"
+            ]]))?;
             let code = ln
-                .register_recurring_payment_code(RecurringPaymentProtocol::LNURL, recurringd_api, &meta)
+                .register_recurring_payment_code(
+                    RecurringPaymentProtocol::LNURL,
+                    recurringd_api,
+                    &meta,
+                )
                 .await?;
             let payment_code_idx = ln
                 .list_recurring_payment_codes()
@@ -581,7 +610,10 @@ impl WalletRuntime {
                 return Ok(());
             }
 
-            if let Some(invoice_map) = ln.list_recurring_payment_code_invoices(payment_code_idx).await {
+            if let Some(invoice_map) = ln
+                .list_recurring_payment_code_invoices(payment_code_idx)
+                .await
+            {
                 for operation_id in invoice_map.into_values() {
                     if seen_operations.insert(operation_id) {
                         on_event(BootstrapEvent::Note(
@@ -608,9 +640,13 @@ impl WalletRuntime {
                     continue;
                 }
                 on_event(BootstrapEvent::Note(
-                    "A new LNURL receive invoice was created. Waiting for payment finality.".to_owned(),
+                    "A new LNURL receive invoice was created. Waiting for payment finality."
+                        .to_owned(),
                 ));
-                if self.await_recurring_receive(client, event.operation_id).await? {
+                if self
+                    .await_recurring_receive(client, event.operation_id)
+                    .await?
+                {
                     let refreshed = client.get_balance_for_btc().await?;
                     on_event(BootstrapEvent::Balance(refreshed));
                     return Ok(());

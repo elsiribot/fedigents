@@ -4,18 +4,18 @@ use std::rc::Rc;
 use leptos::ev::{MouseEvent, SubmitEvent};
 use leptos::html::{Textarea, Video};
 use leptos::prelude::*;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlTextAreaElement;
 
 use crate::agent::{
-    ChatMessage, ChatRole, PendingPaymentProposal, SkillSummary, WalletAgent, assistant_message, load_skills,
-    onboarding_message, user_message,
+    assistant_message, load_skills, onboarding_message, user_message, ChatMessage, ChatRole,
+    PendingPaymentProposal, SkillSummary, WalletAgent,
 };
 use crate::browser;
-use crate::fedimint::{BootstrapEvent, WalletRuntime};
 use crate::ppq::PpqClient;
+use crate::wallet_runtime::{BootstrapEvent, WalletRuntime};
 
 const PPQ_TOPUP_USD: f64 = 0.10;
 
@@ -47,9 +47,10 @@ pub fn App() -> impl IntoView {
         let agent_cell = Rc::clone(&effect_agent);
         spawn_local(async move {
             if let Err(err) = browser::ensure_service_worker().await {
-                push_message(&messages, onboarding_message(format!(
-                    "Service worker registration failed: {err}"
-                )));
+                push_message(
+                    &messages,
+                    onboarding_message(format!("Service worker registration failed: {err}")),
+                );
             }
 
             match load_skills().await {
@@ -80,7 +81,7 @@ pub fn App() -> impl IntoView {
             runtime_cell.borrow_mut().replace(wallet.clone());
 
             let bootstrap_result = wallet
-                .bootstrap(|event| match event {
+                .bootstrap(move |event| match event {
                     BootstrapEvent::Note(note) => {
                         status.set(note.clone());
                         push_message(&messages, onboarding_message(note));
@@ -94,8 +95,8 @@ pub fn App() -> impl IntoView {
                             ),
                         );
                     }
-                    BootstrapEvent::Balance(amount) => {
-                        balance.set(format_balance(amount.sats_round_down()));
+                    BootstrapEvent::Balance(amount_sats) => {
+                        balance.set(format_balance(amount_sats));
                     }
                 })
                 .await;
@@ -130,37 +131,35 @@ pub fn App() -> impl IntoView {
                         onboarding_message("Creating a PPQ account and funding it with $0.10..."),
                     );
                     match fund_ppq(&wallet, &ppq).await {
-                        Ok(api_key) => {
-                            match wallet.mark_ppq_ready().await {
-                                Ok(()) => {
-                                    agent_cell.borrow_mut().replace(WalletAgent::new(
-                                        wallet.clone(),
-                                        ppq,
-                                        api_key,
-                                        skills.get_untracked(),
-                                    ));
-                                    ready.set(true);
-                                    busy.set(false);
-                                    status.set("Wallet ready".to_owned());
-                                    push_message(
+                        Ok(api_key) => match wallet.mark_ppq_ready().await {
+                            Ok(()) => {
+                                agent_cell.borrow_mut().replace(WalletAgent::new(
+                                    wallet.clone(),
+                                    ppq,
+                                    api_key,
+                                    skills.get_untracked(),
+                                ));
+                                ready.set(true);
+                                busy.set(false);
+                                status.set("Wallet ready".to_owned());
+                                push_message(
                                         &messages,
                         assistant_message(
                             "Fedigents is ready. Ask me to check balance, create invoices, or prepare a Lightning payment for review.",
                         ),
                     );
-                                }
-                                Err(err) => {
-                                    busy.set(false);
-                                    status.set("PPQ setup needs recovery".to_owned());
-                                    push_message(
+                            }
+                            Err(err) => {
+                                busy.set(false);
+                                status.set("PPQ setup needs recovery".to_owned());
+                                push_message(
                                         &messages,
                                         onboarding_message(format!(
                                             "PPQ funding completed but the final ready marker could not be saved: {err}. Chat stays locked to avoid double-funding on restart."
                                         )),
                                     );
-                                }
                             }
-                        }
+                        },
                         Err(err) => {
                             busy.set(false);
                             status.set("PPQ funding failed".to_owned());
@@ -185,7 +184,7 @@ pub fn App() -> impl IntoView {
                             busy.set(false);
                             status.set("Wallet ready".to_owned());
                         }
-                        Ok(None) => match wallet.repair_ppq_account(&ppq).await {
+                        Ok(None) => match wallet.repair_ppq_account().await {
                             Ok(account) => {
                                 agent_cell.borrow_mut().replace(WalletAgent::new(
                                     wallet.clone(),
@@ -235,9 +234,9 @@ pub fn App() -> impl IntoView {
     });
 
     let submit_prompt: Rc<dyn Fn(String)> = Rc::new({
-            let agent = Rc::clone(&agent);
-            let runtime = Rc::clone(&runtime);
-            move |text: String| {
+        let agent = Rc::clone(&agent);
+        let runtime = Rc::clone(&runtime);
+        move |text: String| {
             let trimmed = text.trim().to_owned();
             if trimmed.is_empty() {
                 return;
@@ -245,7 +244,9 @@ pub fn App() -> impl IntoView {
             if !ready.get_untracked() {
                 push_message(
                     &messages,
-                    onboarding_message("Chat unlocks after the first deposit and PPQ funding step."),
+                    onboarding_message(
+                        "Chat unlocks after the first deposit and PPQ funding step.",
+                    ),
                 );
                 return;
             }
@@ -272,15 +273,14 @@ pub fn App() -> impl IntoView {
                         }
                         let runtime_value = runtime_cell.borrow().clone();
                         if let Some(runtime_value) = runtime_value {
-                            if let Ok(amount) = runtime_value.get_balance().await {
-                                balance.set(format_balance(amount.sats_round_down()));
+                            if let Ok(amount_sats) = runtime_value.get_balance().await {
+                                balance.set(format_balance(amount_sats));
                             }
                         }
                     }
-                    Err(err) => push_message(
-                        &messages,
-                        onboarding_message(format!("Agent error: {err}")),
-                    ),
+                    Err(err) => {
+                        push_message(&messages, onboarding_message(format!("Agent error: {err}")))
+                    }
                 }
                 busy.set(false);
             });
@@ -299,7 +299,9 @@ pub fn App() -> impl IntoView {
             let Some(runtime_value) = runtime.borrow().clone() else {
                 push_message(
                     &messages,
-                    onboarding_message("Wallet runtime is unavailable, so the payment could not be sent."),
+                    onboarding_message(
+                        "Wallet runtime is unavailable, so the payment could not be sent.",
+                    ),
                 );
                 return;
             };
@@ -308,18 +310,21 @@ pub fn App() -> impl IntoView {
             busy.set(true);
             pending_payment.set(None);
             spawn_local(async move {
-                match runtime_value.pay(&proposal.payment, proposal.amount_sats).await {
+                match runtime_value
+                    .pay(&proposal.payment, proposal.amount_sats)
+                    .await
+                {
                     Ok(result) => {
-                        push_message(&messages, ChatMessage {
-                            role: ChatRole::Tool,
-                            body: format!("pay_lightning => {result}"),
-                        });
                         push_message(
                             &messages,
-                            assistant_message("Payment sent."),
+                            ChatMessage {
+                                role: ChatRole::Tool,
+                                body: format!("pay_lightning => {result}"),
+                            },
                         );
-                        if let Ok(amount) = runtime_value.get_balance().await {
-                            balance.set(format_balance(amount.sats_round_down()));
+                        push_message(&messages, assistant_message("Payment sent."));
+                        if let Ok(amount_sats) = runtime_value.get_balance().await {
+                            balance.set(format_balance(amount_sats));
                         }
                     }
                     Err(err) => {
@@ -364,7 +369,9 @@ pub fn App() -> impl IntoView {
                     prompt.set(scanned.clone());
                     push_message(
                         &messages,
-                        onboarding_message("QR code scanned. Review the prompt or send it directly."),
+                        onboarding_message(
+                            "QR code scanned. Review the prompt or send it directly.",
+                        ),
                     );
                 }
             }) as Box<dyn FnMut(_)>);
@@ -373,7 +380,10 @@ pub fn App() -> impl IntoView {
             callback.forget();
             spawn_local(async move {
                 if let Err(err) = browser::begin_qr_scanner(&video, &function).await {
-                    push_message(&messages, onboarding_message(format!("QR scanner error: {err}")));
+                    push_message(
+                        &messages,
+                        onboarding_message(format!("QR scanner error: {err}")),
+                    );
                 }
             });
         }
@@ -587,7 +597,7 @@ fn truncate_middle(value: &str, limit: usize) -> String {
 }
 
 async fn fund_ppq(wallet: &WalletRuntime, ppq: &PpqClient) -> anyhow::Result<String> {
-    let account = wallet.ensure_ppq_account(ppq).await?;
+    let account = wallet.ensure_ppq_account().await?;
     let topup = ppq.create_lightning_topup(&account, PPQ_TOPUP_USD).await?;
     wallet.begin_ppq_funding_attempt().await?;
     wallet.pay(&topup.invoice, None).await?;

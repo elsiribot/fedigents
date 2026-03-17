@@ -1,7 +1,7 @@
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use fedimint_core::encoding::{Decodable, Encodable};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const API_BASE: &str = "https://api.ppq.ai";
 
@@ -45,10 +45,8 @@ impl PpqClient {
         let body: Value = response.json().await?;
         let object = unwrap_data(&body);
         let account = PpqAccount {
-            credit_id: get_string(object, &["credit_id", "creditId"])?
-                .to_owned(),
-            api_key: get_string(object, &["api_key", "apiKey"])?
-                .to_owned(),
+            credit_id: get_string(object, &["credit_id", "creditId"])?.to_owned(),
+            api_key: get_string(object, &["api_key", "apiKey"])?.to_owned(),
         };
 
         Ok(account)
@@ -104,7 +102,10 @@ impl PpqClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "<unreadable response body>".to_owned());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable response body>".to_owned());
             anyhow::bail!("PPQ chat error {status}: {body}");
         }
 
@@ -137,9 +138,7 @@ impl PpqClient {
                     Ok(text)
                 }
             }
-            other => Err(anyhow::anyhow!(
-                "Unsupported PPQ content payload: {other}"
-            )),
+            other => Err(anyhow::anyhow!("Unsupported PPQ content payload: {other}")),
         }
     }
 }

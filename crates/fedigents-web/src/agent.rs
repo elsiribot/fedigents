@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use web_sys::window;
 
-use crate::fedimint::WalletRuntime;
 use crate::ppq::{PpqClient, PpqMessage};
+use crate::wallet_runtime::WalletRuntime;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SkillSummary {
@@ -79,7 +79,11 @@ impl WalletAgent {
         }
     }
 
-    pub async fn respond(&self, history: &[ChatMessage], _prompt: &str) -> anyhow::Result<AgentResponse> {
+    pub async fn respond(
+        &self,
+        history: &[ChatMessage],
+        _prompt: &str,
+    ) -> anyhow::Result<AgentResponse> {
         let mut transcript = history.to_vec();
 
         let mut outputs = Vec::new();
@@ -133,7 +137,7 @@ impl WalletAgent {
         match tool_call.tool.as_str() {
             "get_balance" => {
                 let balance = self.wallet.get_balance().await?;
-                Ok(ToolOutcome::Message(format!("{} sats", balance.sats_round_down())))
+                Ok(ToolOutcome::Message(format!("{balance} sats")))
             }
             "create_invoice" => {
                 let amount_sats = read_u64(&tool_call.arguments, "amount_sats")?;
@@ -173,7 +177,9 @@ impl WalletAgent {
                     .get("limit")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(10) as usize;
-                Ok(ToolOutcome::Message(self.wallet.list_operations(limit).await?))
+                Ok(ToolOutcome::Message(
+                    self.wallet.list_operations(limit).await?,
+                ))
             }
             "show_receive_code" => Ok(ToolOutcome::Message(
                 self.wallet
@@ -226,18 +232,20 @@ fn build_messages(history: &[ChatMessage], skills: &[SkillSummary]) -> Vec<PpqMe
         content: system_prompt,
     }];
 
-    messages.extend(history.iter().map(|message| PpqMessage {
-        role: match message.role {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-            ChatRole::Assistant => "assistant",
-            ChatRole::Tool => "assistant",
+    messages.extend(history.iter().map(|message| {
+        PpqMessage {
+            role: match message.role {
+                ChatRole::System => "system",
+                ChatRole::User => "user",
+                ChatRole::Assistant => "assistant",
+                ChatRole::Tool => "assistant",
+            }
+            .to_owned(),
+            content: match message.role {
+                ChatRole::Tool => format!("Tool result: {}", message.body),
+                _ => message.body.clone(),
+            },
         }
-        .to_owned(),
-        content: match message.role {
-            ChatRole::Tool => format!("Tool result: {}", message.body),
-            _ => message.body.clone(),
-        },
     }));
 
     messages
@@ -267,8 +275,12 @@ impl ToolOutcome {
 fn parse_plan(raw: &str) -> anyhow::Result<AgentPlan> {
     serde_json::from_str(raw).or_else(|_| {
         let trimmed = raw.trim();
-        let start = trimmed.find('{').ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
-        let end = trimmed.rfind('}').ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
+        let start = trimmed
+            .find('{')
+            .ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
+        let end = trimmed
+            .rfind('}')
+            .ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
         serde_json::from_str(&trimmed[start..=end]).map_err(Into::into)
     })
 }
