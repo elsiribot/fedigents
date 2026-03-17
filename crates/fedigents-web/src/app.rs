@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use leptos::ev::{MouseEvent, SubmitEvent};
+use leptos::ev::{KeyboardEvent, MouseEvent, SubmitEvent};
 use leptos::html::{Textarea, Video};
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
@@ -37,6 +37,7 @@ pub fn App() -> impl IntoView {
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
     let scanner_open = RwSignal::new(false);
     let scanner_error = RwSignal::new(None::<String>);
+    let debug_mode = RwSignal::new(false);
     let video_ref = NodeRef::<Video>::new();
     let textarea_ref = NodeRef::<Textarea>::new();
 
@@ -402,6 +403,7 @@ pub fn App() -> impl IntoView {
     };
 
     let form_submit = Rc::clone(&submit_prompt);
+    let key_submit = Rc::clone(&submit_prompt);
 
     view! {
         <div class="shell">
@@ -412,6 +414,14 @@ pub fn App() -> impl IntoView {
                         <div class="balance-value">{move || balance.get()}</div>
                         <div class="meta-text">{move || status.get()}</div>
                     </div>
+
+                    <label class="topbar-center">
+                        <input type="checkbox"
+                            prop:checked=move || debug_mode.get()
+                            on:change=move |_| debug_mode.update(|v| *v = !*v)
+                        />
+                        "Debug"
+                    </label>
 
                     <button class="scan-button" on:click=start_scan disabled=move || busy.get()>
                         <span>"Scan QR"</span>
@@ -447,9 +457,11 @@ pub fn App() -> impl IntoView {
                                 }
                             });
 
+                            let show_debug = debug_mode.get();
                             let chat_nodes = messages
                                 .get()
                                 .into_iter()
+                                .filter(|m| show_debug || matches!(m.role, ChatRole::User | ChatRole::Assistant))
                                 .map(render_message)
                                 .collect_view();
 
@@ -498,28 +510,30 @@ pub fn App() -> impl IntoView {
                             node_ref=textarea_ref
                             prop:value=move || prompt.get()
                             on:input=move |ev| prompt.set(event_target_value(&ev))
-                            placeholder="Ask to check balance, create an invoice, review a Lightning payment, or use a skill."
+                            on:keydown=move |ev: KeyboardEvent| {
+                                if ev.key() == "Enter" && !ev.shift_key() {
+                                    ev.prevent_default();
+                                    key_submit(prompt.get_untracked());
+                                }
+                            }
+                            rows="1"
+                            placeholder="Send a message..."
                             disabled=move || !ready.get() || busy.get()
                         ></textarea>
-                        <button type="submit" disabled=move || !ready.get() || busy.get()>
-                            {move || if busy.get() { "Working..." } else { "Send" }}
-                        </button>
+                        <button type="submit" disabled=move || !ready.get() || busy.get()></button>
                     </form>
-                    <div class="supporting">
+                    <div
+                        class="supporting"
+                        style:display=move || if pending_payment.get().is_some() { "flex" } else { "none" }
+                    >
                         <button
                             class="secondary-button"
                             type="button"
                             on:click=dismiss_payment
                             disabled=move || busy.get()
-                            style:display=move || if pending_payment.get().is_some() { "inline-flex" } else { "none" }
                         >
                             "Dismiss pending payment"
                         </button>
-                        {move || skills.get().into_iter().map(|skill| {
-                            view! {
-                                <span class="skill-chip">{skill.title}</span>
-                            }
-                        }).collect_view()}
                     </div>
                 </footer>
             </div>
