@@ -23,7 +23,7 @@ extern "C" {
     pub fn stop_qr_scanner(video: &HtmlVideoElement) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_name = createWalletWorker)]
-    pub fn create_wallet_worker() -> Result<Worker, JsValue>;
+    pub fn create_wallet_worker() -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(js_name = supportsSyncAccessHandles)]
     pub fn supports_sync_access_handles_js() -> bool;
@@ -37,8 +37,12 @@ pub async fn open_wallet_handle(file_name: &str) -> anyhow::Result<FileSystemSyn
     Ok(value.unchecked_into())
 }
 
-pub fn spawn_wallet_worker() -> anyhow::Result<Worker> {
-    create_wallet_worker().map_err(js_error)
+pub async fn spawn_wallet_worker() -> anyhow::Result<Worker> {
+    let promise = create_wallet_worker().map_err(js_error)?;
+    let value = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(js_error)?;
+    Ok(value.unchecked_into())
 }
 
 pub fn supports_sync_access_handles() -> bool {

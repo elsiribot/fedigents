@@ -418,7 +418,9 @@ impl WalletRuntimeCore {
 
     async fn ensure_receive_code(&self, client: &Rc<ClientHandle>) -> anyhow::Result<ReceiveCode> {
         if let Some(receive) = self.read_app_state(&ReceiveCodeStateKey).await? {
-            LocalStorage::delete(LNURL_KEY);
+            if !browser::is_worker_context() {
+                LocalStorage::delete(LNURL_KEY);
+            }
             return Ok(receive);
         }
 
@@ -463,6 +465,9 @@ impl WalletRuntimeCore {
     }
 
     async fn migrate_legacy_local_storage(&self) -> anyhow::Result<()> {
+        if browser::is_worker_context() {
+            return Ok(());
+        }
         self.migrate_local_storage_entry::<MnemonicStateKey, String, _>(
             MNEMONIC_KEY,
             &MnemonicStateKey,
@@ -494,6 +499,10 @@ impl WalletRuntimeCore {
         &self,
         client: &Rc<ClientHandle>,
     ) -> anyhow::Result<Option<ReceiveCode>> {
+        if browser::is_worker_context() {
+            return Ok(None);
+        }
+
         if let Ok(receive) = LocalStorage::get::<ReceiveCode>(LNURL_KEY) {
             self.write_app_state(&ReceiveCodeStateKey, &receive).await?;
             LocalStorage::delete(LNURL_KEY);

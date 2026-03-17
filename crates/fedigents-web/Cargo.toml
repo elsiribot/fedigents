@@ -7,18 +7,18 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.100"
 console_error_panic_hook = "0.1.7"
-fedimint-bip39 = { path = "../../../fedimint/fedimint-bip39" }
-fedimint-client = { path = "../../../fedimint/fedimint-client" }
-fedimint-connectors = { path = "../../../fedimint/fedimint-connectors" }
-fedimint-core = { path = "../../../fedimint/fedimint-core" }
-fedimint-cursed-redb = { path = "../../../fedimint/fedimint-cursed-redb" }
-fedimint-derive-secret = { path = "../../../fedimint/crypto/derive-secret" }
-fedimint-eventlog = { path = "../../../fedimint/fedimint-eventlog" }
-fedimint-ln-client = { path = "../../../fedimint/modules/fedimint-ln-client", features = ["cli"] }
-fedimint-meta-client = { path = "../../../fedimint/modules/fedimint-meta-client" }
-fedimint-meta-common = { path = "../../../fedimint/modules/fedimint-meta-common" }
-fedimint-mint-client = { path = "../../../fedimint/modules/fedimint-mint-client" }
-fedimint-wallet-client = { path = "../../../fedimint/modules/fedimint-wallet-client" }
+fedimint-bip39 = "0.10.0"
+fedimint-client = "0.10.0"
+fedimint-connectors = "0.10.0"
+fedimint-core = "0.10.0"
+fedimint-cursed-redb = "0.10.0"
+fedimint-derive-secret = "0.10.0"
+fedimint-eventlog = "0.10.0"
+fedimint-ln-client = { version = "0.10.0", features = ["cli"] }
+fedimint-meta-client = "0.10.0"
+fedimint-meta-common = "0.10.0"
+fedimint-mint-client = "0.10.0"
+fedimint-wallet-client = "0.10.0"
 futures = "0.3.31"
 gloo-storage = "0.3.0"
 gloo-timers = { version = "0.3.0", features = ["futures"] }

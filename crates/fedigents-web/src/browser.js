@@ -1,12 +1,22 @@
 let currentStream = null;
 let currentTimer = null;
 
-export function createWalletWorker() {
+export async function createWalletWorker() {
   const url = new URL("wallet-worker.js", self.location.href);
-  return new Worker(url, {
+  const worker = new Worker(url, {
     type: "module",
     name: "fedigents-wallet"
   });
+  await new Promise((resolve) => {
+    const handler = (event) => {
+      if (event.data === "__ready__") {
+        worker.removeEventListener("message", handler);
+        resolve();
+      }
+    };
+    worker.addEventListener("message", handler);
+  });
+  return worker;
 }
 
 export function supportsSyncAccessHandles() {

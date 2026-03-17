@@ -36,7 +36,7 @@ pub struct WalletRuntime {
 
 impl WalletRuntime {
     pub async fn connect() -> anyhow::Result<Self> {
-        let worker = browser::spawn_wallet_worker()?;
+        let worker = browser::spawn_wallet_worker().await?;
         let client = WorkerClient::new(worker);
         let connect: ConnectResponse = client.request(Command::Connect).await?;
         Ok(Self {
