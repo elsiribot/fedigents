@@ -93,7 +93,7 @@ impl PpqClient {
             .post(format!("{API_BASE}/v1/chat/completions"))
             .headers(auth_headers(api_key)?)
             .json(&json!({
-                "model": "gpt-5-nano",
+                "model": "claude-haiku-4.5",
                 "messages": messages,
                 "temperature": 0.2
             }))

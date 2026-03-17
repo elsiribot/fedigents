@@ -24,6 +24,7 @@ gloo-storage = "0.3.0"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 js-sys = "0.3.77"
 leptos = { version = "0.7.8", default-features = false, features = ["csr"] }
+rig-core = { version = "0.31", default-features = false, features = ["wasm"] }
 lightning-invoice = "0.33.2"
 rand = "0.8.5"
 reqwest = { version = "0.12.24", default-features = false, features = ["json"] }

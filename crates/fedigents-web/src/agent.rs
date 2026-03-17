@@ -1,8 +1,25 @@
+use std::cell::RefCell;
+use std::fmt;
+use std::rc::Rc;
+
+use rig::completion::{Chat, Message, ToolDefinition};
+use rig::prelude::*;
+use rig::providers::openai;
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use web_sys::window;
 
-use crate::ppq::{PpqClient, PpqMessage};
 use crate::wallet_runtime::WalletRuntime;
+
+const PPQ_API_BASE: &str = "https://api.ppq.ai";
+const MODEL: &str = "claude-haiku-4.5";
+
+const PREAMBLE: &str = "\
+You are the wallet agent inside a chat-only Fedimint wallet. \
+All wallet actions must happen through tools. Keep answers short and practical. \
+For outgoing payments, ALWAYS use propose_payment. Never pay directly. \
+The UI shows a confirm button and only that button can actually send funds.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SkillSummary {
@@ -40,40 +57,327 @@ pub struct AgentResponse {
     pub pending_payment: Option<PendingPaymentProposal>,
 }
 
+#[derive(Debug)]
+struct ToolError(anyhow::Error);
+
+impl fmt::Display for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for ToolError {}
+
+impl From<anyhow::Error> for ToolError {
+    fn from(err: anyhow::Error) -> Self {
+        Self(err)
+    }
+}
+
+struct ToolLog {
+    outputs: RefCell<Vec<ChatMessage>>,
+    pending_payment: RefCell<Option<PendingPaymentProposal>>,
+}
+
+impl ToolLog {
+    fn new() -> Rc<Self> {
+        Rc::new(Self {
+            outputs: RefCell::new(Vec::new()),
+            pending_payment: RefCell::new(None),
+        })
+    }
+
+    fn push(&self, role: ChatRole, body: String) {
+        tracing::info!("{body}");
+        self.outputs.borrow_mut().push(ChatMessage { role, body });
+    }
+}
+
+// ── GetBalance ──────────────────────────────────────────────────────────
+
+struct GetBalanceTool {
+    wallet: WalletRuntime,
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct GetBalanceArgs {}
+
+impl Tool for GetBalanceTool {
+    const NAME: &'static str = "get_balance";
+    type Error = ToolError;
+    type Args = GetBalanceArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "get_balance".into(),
+            description: "Get the current wallet balance in sats.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, "[tool call] get_balance".into());
+        let balance = self.wallet.get_balance().await.map_err(ToolError)?;
+        let result = format!("{balance} sats");
+        self.log.push(ChatRole::Tool, format!("get_balance => {result}"));
+        Ok(result)
+    }
+}
+
+// ── CreateInvoice ───────────────────────────────────────────────────────
+
+struct CreateInvoiceTool {
+    wallet: WalletRuntime,
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct CreateInvoiceArgs {
+    amount_sats: u64,
+    #[serde(default = "default_description")]
+    description: String,
+}
+
+fn default_description() -> String {
+    "Fedigents request".into()
+}
+
+impl Tool for CreateInvoiceTool {
+    const NAME: &'static str = "create_invoice";
+    type Error = ToolError;
+    type Args = CreateInvoiceArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "create_invoice".into(),
+            description: "Create a BOLT11 invoice to receive a payment.".into(),
+            parameters: json!({
+                "type": "object",
+                "required": ["amount_sats"],
+                "properties": {
+                    "amount_sats": { "type": "integer", "description": "Amount in satoshis" },
+                    "description": { "type": "string", "description": "Invoice description" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, format!("[tool call] create_invoice({})", args.amount_sats));
+        let invoice = self.wallet.create_invoice(args.amount_sats, &args.description).await.map_err(ToolError)?;
+        let result = serde_json::to_string(&invoice).map_err(|e| ToolError(e.into()))?;
+        self.log.push(ChatRole::Tool, format!("create_invoice => {result}"));
+        Ok(result)
+    }
+}
+
+// ── ProposePayment ──────────────────────────────────────────────────────
+
+struct ProposePaymentTool {
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct ProposePaymentArgs {
+    payment: String,
+    amount_sats: Option<u64>,
+    #[serde(default = "default_payment_summary")]
+    summary: String,
+}
+
+fn default_payment_summary() -> String {
+    "Lightning payment awaiting confirmation".into()
+}
+
+impl Tool for ProposePaymentTool {
+    const NAME: &'static str = "propose_payment";
+    type Error = ToolError;
+    type Args = ProposePaymentArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "propose_payment".into(),
+            description: "Propose an outgoing Lightning payment for user confirmation. The UI shows a confirm button; only that button sends funds.".into(),
+            parameters: json!({
+                "type": "object",
+                "required": ["payment", "summary"],
+                "properties": {
+                    "payment": { "type": "string", "description": "BOLT11 invoice or LNURL" },
+                    "amount_sats": { "type": "integer", "description": "Amount in sats (required for amountless invoices/LNURL)" },
+                    "summary": { "type": "string", "description": "Short human-readable description" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, format!("[tool call] propose_payment({})", args.summary));
+        let proposal = PendingPaymentProposal {
+            payment: args.payment,
+            amount_sats: args.amount_sats,
+            summary: args.summary,
+        };
+        let result = json!({
+            "status": "pending_confirmation",
+            "summary": proposal.summary,
+            "amount_sats": proposal.amount_sats,
+            "payment": proposal.payment,
+        }).to_string();
+        self.log.pending_payment.replace(Some(proposal));
+        self.log.push(ChatRole::Tool, format!("propose_payment => {result}"));
+        Ok(result)
+    }
+}
+
+// ── ListOperations ──────────────────────────────────────────────────────
+
+struct ListOperationsTool {
+    wallet: WalletRuntime,
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct ListOperationsArgs {
+    #[serde(default = "default_limit")]
+    limit: u64,
+}
+
+fn default_limit() -> u64 {
+    10
+}
+
+impl Tool for ListOperationsTool {
+    const NAME: &'static str = "list_operations";
+    type Error = ToolError;
+    type Args = ListOperationsArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "list_operations".into(),
+            description: "List recent wallet operations.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max operations to return (default 10)" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, format!("[tool call] list_operations({})", args.limit));
+        let result = self.wallet.list_operations(args.limit as usize).await.map_err(ToolError)?;
+        self.log.push(ChatRole::Tool, format!("list_operations => {result}"));
+        Ok(result)
+    }
+}
+
+// ── ShowReceiveCode ─────────────────────────────────────────────────────
+
+struct ShowReceiveCodeTool {
+    wallet: WalletRuntime,
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct ShowReceiveCodeArgs {}
+
+impl Tool for ShowReceiveCodeTool {
+    const NAME: &'static str = "show_receive_code";
+    type Error = ToolError;
+    type Args = ShowReceiveCodeArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "show_receive_code".into(),
+            description: "Show the wallet's LNURL receive code.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, "[tool call] show_receive_code".into());
+        let result = self.wallet.cached_receive_code().await.map_err(ToolError)?
+            .unwrap_or_else(|| "No receive code available yet".into());
+        self.log.push(ChatRole::Tool, format!("show_receive_code => {result}"));
+        Ok(result)
+    }
+}
+
+// ── LoadSkill ───────────────────────────────────────────────────────────
+
+struct LoadSkillTool {
+    skills: Vec<SkillSummary>,
+    log: Rc<ToolLog>,
+}
+
+#[derive(Deserialize)]
+struct LoadSkillArgs {
+    slug: String,
+}
+
+impl Tool for LoadSkillTool {
+    const NAME: &'static str = "load_skill";
+    type Error = ToolError;
+    type Args = LoadSkillArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: "load_skill".into(),
+            description: "Load a skill's full prompt by slug.".into(),
+            parameters: json!({
+                "type": "object",
+                "required": ["slug"],
+                "properties": {
+                    "slug": { "type": "string", "description": "Skill identifier" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<String, ToolError> {
+        self.log.push(ChatRole::Tool, format!("[tool call] load_skill({})", args.slug));
+        let skill = self.skills.iter()
+            .find(|s| s.slug == args.slug)
+            .ok_or_else(|| ToolError(anyhow::anyhow!("Unknown skill: {}", args.slug)))?;
+        let result = if let Some(path) = &skill.path {
+            reqwest::get(&asset_url(path).map_err(ToolError)?)
+                .await.map_err(|e| ToolError(e.into()))?
+                .error_for_status().map_err(|e| ToolError(e.into()))?
+                .text().await.map_err(|e| ToolError(e.into()))?
+        } else {
+            serde_json::to_string(skill).map_err(|e| ToolError(e.into()))?
+        };
+        self.log.push(ChatRole::Tool, format!("load_skill => {result}"));
+        Ok(result)
+    }
+}
+
+// ── WalletAgent ─────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct WalletAgent {
     wallet: WalletRuntime,
-    ppq: PpqClient,
     ppq_api_key: String,
     skills: Vec<SkillSummary>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgentPlan {
-    assistant: String,
-    #[serde(default)]
-    done: bool,
-    #[serde(default)]
-    tool_calls: Vec<ToolCall>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolCall {
-    tool: String,
-    #[serde(default)]
-    arguments: serde_json::Value,
 }
 
 impl WalletAgent {
     pub fn new(
         wallet: WalletRuntime,
-        ppq: PpqClient,
+        _ppq: crate::ppq::PpqClient,
         ppq_api_key: String,
         skills: Vec<SkillSummary>,
     ) -> Self {
         Self {
             wallet,
-            ppq,
             ppq_api_key,
             skills,
         }
@@ -82,222 +386,55 @@ impl WalletAgent {
     pub async fn respond(
         &self,
         history: &[ChatMessage],
-        _prompt: &str,
+        prompt: &str,
     ) -> anyhow::Result<AgentResponse> {
-        let mut transcript = history.to_vec();
+        let log = ToolLog::new();
 
-        let mut outputs = Vec::new();
-        let mut pending_payment = None;
-        for _ in 0..4 {
-            let request = build_messages(&transcript, &self.skills);
-            let raw = self.ppq.chat(&self.ppq_api_key, &request).await?;
-            let plan = parse_plan(&raw)?;
+        let skills_ctx = serde_json::to_string(&self.skills).unwrap_or_else(|_| "[]".into());
+        let preamble = format!("{PREAMBLE}\n\nSkills available: {skills_ctx}");
 
-            if !plan.assistant.trim().is_empty() {
-                let message = ChatMessage {
-                    role: ChatRole::Assistant,
-                    body: plan.assistant.clone(),
-                };
-                transcript.push(message.clone());
-                outputs.push(message);
-            }
+        let client: openai::CompletionsClient = openai::CompletionsClient::builder()
+            .api_key(&self.ppq_api_key)
+            .base_url(PPQ_API_BASE)
+            .build()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            if plan.tool_calls.is_empty() || plan.done {
-                return Ok(AgentResponse {
-                    messages: outputs,
-                    pending_payment,
-                });
-            }
+        let agent = client
+            .agent(MODEL)
+            .preamble(&preamble)
+            .default_max_turns(4)
+            .temperature(0.2)
+            .tool(GetBalanceTool { wallet: self.wallet.clone(), log: Rc::clone(&log) })
+            .tool(CreateInvoiceTool { wallet: self.wallet.clone(), log: Rc::clone(&log) })
+            .tool(ProposePaymentTool { log: Rc::clone(&log) })
+            .tool(ListOperationsTool { wallet: self.wallet.clone(), log: Rc::clone(&log) })
+            .tool(ShowReceiveCodeTool { wallet: self.wallet.clone(), log: Rc::clone(&log) })
+            .tool(LoadSkillTool { skills: self.skills.clone(), log: Rc::clone(&log) })
+            .build();
 
-            for tool_call in plan.tool_calls {
-                let result = self.execute_tool(&tool_call).await?;
-                let tool_message = ChatMessage {
-                    role: ChatRole::Tool,
-                    body: format!("{} => {}", tool_call.tool, result.summary()),
-                };
-                if let ToolOutcome::PendingPayment(proposal) = &result {
-                    pending_payment = Some(proposal.clone());
-                }
-                transcript.push(tool_message.clone());
-                outputs.push(tool_message);
-            }
-        }
+        let chat_history = history.iter().filter_map(|m| match m.role {
+            ChatRole::User => Some(Message::user(m.body.clone())),
+            ChatRole::Assistant => Some(Message::assistant(m.body.clone())),
+            _ => None,
+        }).collect::<Vec<_>>();
 
+        let response = agent.chat(prompt, chat_history).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut outputs = log.outputs.take();
         outputs.push(ChatMessage {
             role: ChatRole::Assistant,
-            body: "I hit my tool step limit. Please refine the request or try again.".to_owned(),
+            body: response,
         });
+
         Ok(AgentResponse {
             messages: outputs,
-            pending_payment,
+            pending_payment: log.pending_payment.take(),
         })
     }
-
-    async fn execute_tool(&self, tool_call: &ToolCall) -> anyhow::Result<ToolOutcome> {
-        match tool_call.tool.as_str() {
-            "get_balance" => {
-                let balance = self.wallet.get_balance().await?;
-                Ok(ToolOutcome::Message(format!("{balance} sats")))
-            }
-            "create_invoice" => {
-                let amount_sats = read_u64(&tool_call.arguments, "amount_sats")?;
-                let description = tool_call
-                    .arguments
-                    .get("description")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Fedigents request");
-                let invoice = self.wallet.create_invoice(amount_sats, description).await?;
-                Ok(ToolOutcome::Message(serde_json::to_string(&invoice)?))
-            }
-            "pay_lightning" | "propose_payment" => {
-                let payment = read_string(&tool_call.arguments, "payment")?;
-                let amount_sats = tool_call
-                    .arguments
-                    .get("amount_sats")
-                    .and_then(serde_json::Value::as_u64);
-                let summary = tool_call
-                    .arguments
-                    .get("summary")
-                    .or_else(|| tool_call.arguments.get("description"))
-                    .or_else(|| tool_call.arguments.get("request"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("Lightning payment awaiting confirmation")
-                    .to_owned();
-                Ok(ToolOutcome::PendingPayment(PendingPaymentProposal {
-                    payment: payment.to_owned(),
-                    amount_sats,
-                    summary,
-                }))
-            }
-            "list_operations" => {
-                let limit = tool_call
-                    .arguments
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(10) as usize;
-                Ok(ToolOutcome::Message(
-                    self.wallet.list_operations(limit).await?,
-                ))
-            }
-            "show_receive_code" => Ok(ToolOutcome::Message(
-                self.wallet
-                    .cached_receive_code()
-                    .await?
-                    .unwrap_or_else(|| "No receive code available yet".to_owned()),
-            )),
-            "load_skill" => {
-                let slug = read_string(&tool_call.arguments, "slug")?;
-                let skill = self
-                    .skills
-                    .iter()
-                    .find(|skill| skill.slug == slug)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown skill: {slug}"))?;
-                if let Some(path) = &skill.path {
-                    let body = reqwest::get(&asset_url(path)?)
-                        .await?
-                        .error_for_status()?
-                        .text()
-                        .await?;
-                    Ok(ToolOutcome::Message(body))
-                } else {
-                    Ok(ToolOutcome::Message(serde_json::to_string(skill)?))
-                }
-            }
-            other => Err(anyhow::anyhow!("Unknown tool: {other}")),
-        }
-    }
 }
 
-fn build_messages(history: &[ChatMessage], skills: &[SkillSummary]) -> Vec<PpqMessage> {
-    let system_prompt = format!(
-        concat!(
-            "You are the wallet agent inside a chat-only Fedimint wallet. ",
-            "All wallet actions must happen through tools. Keep answers short and practical. ",
-            "Available tools: get_balance, create_invoice, propose_payment, pay_lightning, list_operations, show_receive_code, load_skill. ",
-            "For outgoing payments, never execute a payment directly in chat. Use propose_payment (or pay_lightning for compatibility) to create a pending confirmation with payment, amount_sats when known, and a short summary. ",
-            "The UI shows a confirm button and only that button can actually send funds. ",
-            "When you need a tool, respond with strict JSON in this shape: ",
-            "{{\"assistant\":\"short text\",\"done\":false,\"tool_calls\":[{{\"tool\":\"name\",\"arguments\":{{}}}}]}}. ",
-            "When you are done and do not need tools, respond with strict JSON in this shape: ",
-            "{{\"assistant\":\"final text\",\"done\":true,\"tool_calls\":[]}}. ",
-            "Never wrap JSON in markdown. Skills available: {}"
-        ),
-        serde_json::to_string(skills).unwrap_or_else(|_| "[]".to_owned())
-    );
-
-    let mut messages = vec![PpqMessage {
-        role: "system".to_owned(),
-        content: system_prompt,
-    }];
-
-    messages.extend(history.iter().map(|message| {
-        PpqMessage {
-            role: match message.role {
-                ChatRole::System => "system",
-                ChatRole::User => "user",
-                ChatRole::Assistant => "assistant",
-                ChatRole::Tool => "assistant",
-            }
-            .to_owned(),
-            content: match message.role {
-                ChatRole::Tool => format!("Tool result: {}", message.body),
-                _ => message.body.clone(),
-            },
-        }
-    }));
-
-    messages
-}
-
-#[derive(Clone, Debug)]
-enum ToolOutcome {
-    Message(String),
-    PendingPayment(PendingPaymentProposal),
-}
-
-impl ToolOutcome {
-    fn summary(&self) -> String {
-        match self {
-            Self::Message(message) => message.clone(),
-            Self::PendingPayment(proposal) => serde_json::json!({
-                "status": "pending_confirmation",
-                "summary": proposal.summary,
-                "amount_sats": proposal.amount_sats,
-                "payment": proposal.payment,
-            })
-            .to_string(),
-        }
-    }
-}
-
-fn parse_plan(raw: &str) -> anyhow::Result<AgentPlan> {
-    serde_json::from_str(raw).or_else(|_| {
-        let trimmed = raw.trim();
-        let start = trimmed
-            .find('{')
-            .ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
-        let end = trimmed
-            .rfind('}')
-            .ok_or_else(|| anyhow::anyhow!("No JSON object returned by the agent"))?;
-        serde_json::from_str(&trimmed[start..=end]).map_err(Into::into)
-    })
-}
-
-fn read_string<'a>(value: &'a serde_json::Value, key: &str) -> anyhow::Result<&'a str> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("Missing string argument: {key}"))
-}
-
-fn read_u64(value: &serde_json::Value, key: &str) -> anyhow::Result<u64> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| anyhow::anyhow!("Missing numeric argument: {key}"))
-}
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 pub async fn load_skills() -> anyhow::Result<Vec<SkillSummary>> {
     let response = reqwest::get(&asset_url("skills/index.json")?)
