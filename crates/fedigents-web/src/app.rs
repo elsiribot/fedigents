@@ -37,6 +37,7 @@ pub fn App() -> impl IntoView {
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
     let scanner_open = RwSignal::new(false);
     let scanner_error = RwSignal::new(None::<String>);
+    let debug_mode = RwSignal::new(false);
     let video_ref = NodeRef::<Video>::new();
     let textarea_ref = NodeRef::<Textarea>::new();
 
@@ -143,21 +144,21 @@ pub fn App() -> impl IntoView {
                                 busy.set(false);
                                 status.set("Wallet ready".to_owned());
                                 push_message(
-                                        &messages,
-                        assistant_message(
-                            "Fedigents is ready. Ask me to check balance, create invoices, or prepare a Lightning payment for review.",
-                        ),
-                    );
+                                    &messages,
+                                    assistant_message(
+                                        "Fedigents is ready. Ask me to check balance, create invoices, or prepare a Lightning payment for review.",
+                                    ),
+                                );
                             }
                             Err(err) => {
                                 busy.set(false);
                                 status.set("PPQ setup needs recovery".to_owned());
                                 push_message(
-                                        &messages,
-                                        onboarding_message(format!(
-                                            "PPQ funding completed but the final ready marker could not be saved: {err}. Chat stays locked to avoid double-funding on restart."
-                                        )),
-                                    );
+                                    &messages,
+                                    onboarding_message(format!(
+                                        "PPQ funding completed but the final ready marker could not be saved: {err}. Chat stays locked to avoid double-funding on restart."
+                                    )),
+                                );
                             }
                         },
                         Err(err) => {
@@ -402,6 +403,7 @@ pub fn App() -> impl IntoView {
     };
 
     let form_submit = Rc::clone(&submit_prompt);
+    let keydown_submit = Rc::clone(&submit_prompt);
 
     view! {
         <div class="shell">
@@ -410,13 +412,26 @@ pub fn App() -> impl IntoView {
                     <div class="balance-card">
                         <div class="balance-label">"Balance"</div>
                         <div class="balance-value">{move || balance.get()}</div>
-                        <div class="meta-text">{move || status.get()}</div>
                     </div>
 
-                    <button class="scan-button" on:click=start_scan disabled=move || busy.get()>
-                        <span>"Scan QR"</span>
-                        <span aria-hidden="true">"[]"</span>
-                    </button>
+                    <div class="topbar-center">
+                        <input
+                            type="checkbox"
+                            id="debug-toggle"
+                            prop:checked=move || debug_mode.get()
+                            on:change=move |ev| {
+                                debug_mode.set(event_target_checked(&ev));
+                            }
+                        />
+                        <label for="debug-toggle">"Debug"</label>
+                    </div>
+
+                    <div style="display:flex;align-items:center;gap:0.5rem">
+                        <div class="meta-text">{move || status.get()}</div>
+                        <button class="scan-button" on:click=start_scan disabled=move || busy.get()>
+                            "Scan"
+                        </button>
+                    </div>
                 </header>
 
                 <section class="chat-panel">
@@ -447,10 +462,11 @@ pub fn App() -> impl IntoView {
                                 }
                             });
 
+                            let debug = debug_mode.get();
                             let chat_nodes = messages
                                 .get()
                                 .into_iter()
-                                .map(render_message)
+                                .map(|msg| render_message(msg, debug))
                                 .collect_view();
 
                             view! {
@@ -482,9 +498,19 @@ pub fn App() -> impl IntoView {
                                     </dd>
                                 </div>
                             </dl>
-                            <button class="action-button" type="button" on:click=confirm_payment disabled=move || busy.get() || confirming_payment.get()>
-                                {move || if busy.get() || confirming_payment.get() { "Sending..." } else { "Confirm payment" }}
-                            </button>
+                            <div style="display:flex;gap:0.5rem">
+                                <button class="action-button" type="button" on:click=confirm_payment disabled=move || busy.get() || confirming_payment.get()>
+                                    {move || if busy.get() || confirming_payment.get() { "Sending..." } else { "Confirm" }}
+                                </button>
+                                <button
+                                    class="secondary-button"
+                                    type="button"
+                                    on:click=dismiss_payment
+                                    disabled=move || busy.get()
+                                >
+                                    "Dismiss"
+                                </button>
+                            </div>
                         </article>
                     </div>
                 </section>
@@ -498,29 +524,20 @@ pub fn App() -> impl IntoView {
                             node_ref=textarea_ref
                             prop:value=move || prompt.get()
                             on:input=move |ev| prompt.set(event_target_value(&ev))
-                            placeholder="Ask to check balance, create an invoice, review a Lightning payment, or use a skill."
+                            on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                if ev.key() == "Enter" && !ev.shift_key() {
+                                    ev.prevent_default();
+                                    keydown_submit(prompt.get_untracked());
+                                }
+                            }
+                            placeholder="Message Fedigents..."
                             disabled=move || !ready.get() || busy.get()
+                            rows="1"
                         ></textarea>
                         <button type="submit" disabled=move || !ready.get() || busy.get()>
-                            {move || if busy.get() { "Working..." } else { "Send" }}
+                            {move || if busy.get() { "..." } else { "Send" }}
                         </button>
                     </form>
-                    <div class="supporting">
-                        <button
-                            class="secondary-button"
-                            type="button"
-                            on:click=dismiss_payment
-                            disabled=move || busy.get()
-                            style:display=move || if pending_payment.get().is_some() { "inline-flex" } else { "none" }
-                        >
-                            "Dismiss pending payment"
-                        </button>
-                        {move || skills.get().into_iter().map(|skill| {
-                            view! {
-                                <span class="skill-chip">{skill.title}</span>
-                            }
-                        }).collect_view()}
-                    </div>
                 </footer>
             </div>
 
@@ -545,7 +562,8 @@ pub fn App() -> impl IntoView {
     }
 }
 
-fn render_message(message: ChatMessage) -> impl IntoView {
+fn render_message(message: ChatMessage, debug: bool) -> impl IntoView {
+    let is_internal = matches!(message.role, ChatRole::System | ChatRole::Tool);
     let role_class = match message.role {
         ChatRole::System => "system",
         ChatRole::User => "user",
@@ -558,9 +576,10 @@ fn render_message(message: ChatMessage) -> impl IntoView {
         ChatRole::Assistant => "agent",
         ChatRole::Tool => "tool",
     };
+    let hidden = is_internal && !debug;
 
     view! {
-        <article class=format!("message {role_class}")>
+        <article class=format!("message {role_class}{}", if hidden { " internal-hidden" } else { "" })>
             <div class="message-meta">
                 <span class="message-role">{role_label}</span>
             </div>
@@ -609,4 +628,11 @@ fn event_target_value(ev: &web_sys::Event) -> String {
         .and_then(|target| target.dyn_into::<HtmlTextAreaElement>().ok())
         .map(|input| input.value())
         .unwrap_or_default()
+}
+
+fn event_target_checked(ev: &web_sys::Event) -> bool {
+    ev.target()
+        .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+        .map(|input| input.checked())
+        .unwrap_or(false)
 }
