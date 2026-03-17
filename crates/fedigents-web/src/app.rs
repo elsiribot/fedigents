@@ -436,16 +436,23 @@ pub fn App() -> impl IntoView {
                             let show_receive = receive.is_some() && !ready.get();
                             let receive_view = show_receive.then(|| {
                                 let lnurl = receive.unwrap_or_default();
+                                let qr_svg = generate_qr_svg(&lnurl);
+                                let lnurl_for_copy = lnurl.clone();
                                 view! {
                                     <div class="receive-card">
                                         <div class="message-role">"First deposit"</div>
                                         <div>
                                             "Use this LNURL to fund the wallet. After the first receive settles, Fedigents will top up PPQ with $0.10 and unlock the chat interface."
                                         </div>
+                                        {qr_svg.map(|svg| view! {
+                                            <div class="qr-inline">
+                                                <div class="qr-svg" inner_html=svg></div>
+                                            </div>
+                                        })}
                                         <div class="receive-code">{lnurl.clone()}</div>
                                         <div>
                                             <button class="secondary-button" on:click=move |_| {
-                                                let lnurl = lnurl.clone();
+                                                let lnurl = lnurl_for_copy.clone();
                                                 spawn_local(async move {
                                                     let _ = browser::copy_to_clipboard(&lnurl).await;
                                                 });
@@ -573,12 +580,32 @@ fn render_message(message: ChatMessage) -> impl IntoView {
         ChatRole::Tool => "tool",
     };
 
+    let html_body = markdown_to_html(&message.body);
+    let qr_codes = extract_payable_strings(&message.body)
+        .into_iter()
+        .filter_map(|s| generate_qr_svg(&s).map(|svg| (s, svg)))
+        .collect::<Vec<_>>();
+
     view! {
         <article class=format!("message {role_class}")>
             <div class="message-meta">
                 <span class="message-role">{role_label}</span>
             </div>
-            <div class="message-body">{message.body}</div>
+            <div class="message-body markdown-body" inner_html=html_body></div>
+            {qr_codes.into_iter().map(|(data, svg)| {
+                let data_for_copy = data.clone();
+                view! {
+                    <div class="qr-inline">
+                        <div class="qr-svg" inner_html=svg></div>
+                        <button class="secondary-button qr-copy-btn" on:click=move |_| {
+                            let d = data_for_copy.clone();
+                            spawn_local(async move {
+                                let _ = browser::copy_to_clipboard(&d).await;
+                            });
+                        }>"Copy"</button>
+                    </div>
+                }
+            }).collect_view()}
         </article>
     }
 }
@@ -616,6 +643,53 @@ async fn fund_ppq(wallet: &WalletRuntime, ppq: &PpqClient) -> anyhow::Result<Str
     wallet.begin_ppq_funding_attempt().await?;
     wallet.pay(&topup.invoice, None).await?;
     Ok(account.api_key)
+}
+
+fn markdown_to_html(input: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(input, options);
+    let mut output = String::new();
+    html::push_html(&mut output, parser);
+    output
+}
+
+fn generate_qr_svg(data: &str) -> Option<String> {
+    use qrcode::render::svg;
+    use qrcode::QrCode;
+    let code = QrCode::new(data.as_bytes()).ok()?;
+    Some(
+        code.render::<svg::Color>()
+            .min_dimensions(180, 180)
+            .max_dimensions(180, 180)
+            .dark_color(svg::Color("#0b1013"))
+            .light_color(svg::Color("#ffffff"))
+            .build(),
+    )
+}
+
+fn extract_payable_strings(text: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    for word in text.split(|c: char| c.is_whitespace() || c == '`' || c == '\'' || c == '"') {
+        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("lnbc")
+            || lower.starts_with("lnurl")
+            || lower.starts_with("lightning:")
+            || lower.starts_with("bitcoin:")
+        {
+            if trimmed.len() > 20 {
+                results.push(trimmed.to_owned());
+            }
+        }
+    }
+    results.dedup();
+    results
 }
 
 fn event_target_value(ev: &web_sys::Event) -> String {

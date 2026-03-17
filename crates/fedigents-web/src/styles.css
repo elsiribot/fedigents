@@ -176,13 +176,20 @@ input {
 
 .message {
   display: flex;
-  align-items: flex-end;
-  gap: var(--spacing-sm);
+  flex-direction: column;
+  gap: var(--spacing-xs);
   animation: slideIn 0.2s ease-out;
+  max-width: 95%;
 }
 
 .message.user {
-  flex-direction: row-reverse;
+  align-self: flex-end;
+}
+
+.message.assistant,
+.message.system,
+.message.tool {
+  align-self: flex-start;
 }
 
 .message-meta {
@@ -190,13 +197,69 @@ input {
 }
 
 .message-body {
-  max-width: 95%;
-  padding: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
   border-radius: 12px;
   line-height: 1.5;
   font-size: var(--font-size-body);
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+.message-body.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.message-body.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.message-body.markdown-body p {
+  margin: 0.4em 0;
+}
+
+.message-body.markdown-body code {
+  font-family: monospace;
+  font-size: 0.9em;
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.message-body.markdown-body pre {
+  margin: 0.5em 0;
+  padding: var(--spacing-sm);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.06);
+  overflow-x: auto;
+}
+
+.message-body.markdown-body pre code {
+  padding: 0;
+  background: none;
+}
+
+.message-body.markdown-body ul,
+.message-body.markdown-body ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+
+.message-body.markdown-body table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: var(--font-size-caption);
+}
+
+.message-body.markdown-body th,
+.message-body.markdown-body td {
+  border: 1px solid var(--color-light-grey);
+  padding: var(--spacing-xs) var(--spacing-sm);
+}
+
+.message-body.markdown-body blockquote {
+  margin: 0.4em 0;
+  padding-left: var(--spacing-md);
+  border-left: 3px solid var(--color-light-grey);
+  color: var(--color-dark-grey);
 }
 
 .message.user .message-body {
@@ -220,6 +283,35 @@ input {
   color: var(--color-dark-grey);
   font-size: var(--font-size-caption);
   font-family: monospace;
+}
+
+.qr-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+}
+
+.qr-svg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-sm);
+  background: var(--color-white);
+  border-radius: 12px;
+  border: 1px solid var(--color-extra-light-grey);
+}
+
+.qr-svg svg {
+  display: block;
+  width: 180px;
+  height: 180px;
+}
+
+.qr-copy-btn {
+  font-size: var(--font-size-small);
+  padding: var(--spacing-xs) var(--spacing-md);
 }
 
 @keyframes slideIn {

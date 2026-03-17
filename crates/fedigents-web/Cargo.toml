@@ -24,6 +24,8 @@ gloo-storage = "0.3.0"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 js-sys = "0.3.77"
 leptos = { version = "0.7.8", default-features = false, features = ["csr"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rig-core = { version = "0.30", default-features = false, features = ["wasm"] }
 lightning-invoice = "0.33.2"
 rand = "0.8.5"
