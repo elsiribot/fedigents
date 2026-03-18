@@ -5,6 +5,7 @@ use leptos::ev::{KeyboardEvent, MouseEvent, SubmitEvent};
 use leptos::html::Textarea;
 use leptos::prelude::*;
 use leptos_qr_scanner::Scan;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlTextAreaElement;
 
@@ -111,7 +112,8 @@ pub fn App() -> impl IntoView {
 
             // Start watching for incoming payments in the background.
             {
-                let wallet = wallet.clone();
+                let listener_wallet = wallet.clone();
+                let watcher_wallet = wallet.clone();
                 wallet.set_operation_listener(Some(Rc::new(move |event| {
                     match event {
                         OperationEvent::PaymentReceived { amount_sats } => {
@@ -120,7 +122,7 @@ pub fn App() -> impl IntoView {
                                 None => "Incoming payment received.".to_owned(),
                             };
                             push_message(&messages, onboarding_message(msg));
-                            let wallet = wallet.clone();
+                            let wallet = listener_wallet.clone();
                             spawn_local(async move {
                                 if let Ok(sats) = wallet.get_balance().await {
                                     balance.set(format_balance(sats));
@@ -129,9 +131,8 @@ pub fn App() -> impl IntoView {
                         }
                     }
                 })));
-                let wallet = wallet.clone();
                 spawn_local(async move {
-                    if let Err(err) = wallet.watch_pending_receives().await {
+                    if let Err(err) = watcher_wallet.watch_pending_receives().await {
                         tracing::warn!("Failed to start background receive watchers: {err}");
                     }
                 });
@@ -384,11 +385,6 @@ pub fn App() -> impl IntoView {
     };
 
     let scan_submit = Rc::clone(&submit_prompt);
-    let on_scan: Rc<dyn Fn(String)> = Rc::new(move |data: String| {
-        scanner_open.set(false);
-        scan_submit(data);
-    });
-
     let form_submit = Rc::clone(&submit_prompt);
     let key_submit = Rc::clone(&submit_prompt);
 
@@ -532,19 +528,15 @@ pub fn App() -> impl IntoView {
                 </footer>
             </div>
 
-            <Show when=move || scanner_open.get()>
-                {
-                    let on_scan = Rc::clone(&on_scan);
-                    view! {
-                        <Scan
-                            active=scanner_open
-                            on_scan=move |data| on_scan(data)
-                            class="modal-shell"
-                            video_class="scanner-video"
-                        />
-                    }
+            <Scan
+                active=scanner_open
+                on_scan=move |data: String| {
+                    scanner_open.set(false);
+                    scan_submit(data);
                 }
-            </Show>
+                class="modal-shell"
+                video_class="scanner-video"
+            />
         </div>
     }
 }
@@ -678,6 +670,6 @@ fn extract_payable_strings(text: &str) -> Vec<String> {
 fn event_target_value(ev: &web_sys::Event) -> String {
     ev.target()
         .and_then(|target| target.dyn_into::<HtmlTextAreaElement>().ok())
-        .map(|input| input.value())
+        .map(|input: HtmlTextAreaElement| input.value())
         .unwrap_or_default()
 }
