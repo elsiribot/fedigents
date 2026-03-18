@@ -1,6 +1,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
+use gloo_timers::future::sleep;
+use js_sys::Date;
 use leptos::ev::{KeyboardEvent, MouseEvent, SubmitEvent};
 use leptos::html::Textarea;
 use leptos::prelude::*;
@@ -10,14 +13,17 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlTextAreaElement;
 
 use crate::agent::{
-    assistant_message, load_skills, onboarding_message, user_message, ChatMessage, ChatRole,
-    PendingPaymentProposal, SkillSummary, WalletAgent,
+    ChatMessage, ChatRole, PendingPaymentProposal, SkillSummary, WalletAgent, assistant_message,
+    load_skills, onboarding_message, user_message,
 };
 use crate::browser;
-use crate::ppq::PpqClient;
+use crate::ppq::{PpqAccount, PpqClient};
 use crate::wallet_runtime::{BootstrapEvent, OperationEvent, WalletRuntime};
 
 const PPQ_TOPUP_USD: f64 = 0.10;
+const PPQ_LOW_BALANCE_USD: f64 = 0.05;
+const PPQ_BALANCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const PPQ_TOPUP_GRACE_MS: f64 = 120_000.0;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -37,13 +43,19 @@ pub fn App() -> impl IntoView {
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
     let scanner_open = RwSignal::new(false);
     let debug_mode = RwSignal::new(false);
+    let ppq_account = RwSignal::new(None::<PpqAccount>);
+    let ppq_low_balance_usd = RwSignal::new(None::<f64>);
+    let ppq_topup_in_progress = RwSignal::new(false);
+    let ppq_topup_grace_until = Rc::new(RefCell::new(None::<f64>));
     let textarea_ref = NodeRef::<Textarea>::new();
 
     let effect_runtime = Rc::clone(&runtime);
     let effect_agent = Rc::clone(&agent);
+    let effect_ppq_topup_grace_until = Rc::clone(&ppq_topup_grace_until);
     Effect::new(move |_| {
         let runtime_cell = Rc::clone(&effect_runtime);
         let agent_cell = Rc::clone(&effect_agent);
+        let ppq_topup_grace_until = Rc::clone(&effect_ppq_topup_grace_until);
         spawn_local(async move {
             if let Err(err) = browser::ensure_service_worker().await {
                 push_message(
@@ -114,21 +126,19 @@ pub fn App() -> impl IntoView {
             {
                 let listener_wallet = wallet.clone();
                 let watcher_wallet = wallet.clone();
-                wallet.set_operation_listener(Some(Rc::new(move |event| {
-                    match event {
-                        OperationEvent::PaymentReceived { amount_sats } => {
-                            let msg = match amount_sats {
-                                Some(sats) => format!("Incoming payment of {sats} sats received."),
-                                None => "Incoming payment received.".to_owned(),
-                            };
-                            push_message(&messages, onboarding_message(msg));
-                            let wallet = listener_wallet.clone();
-                            spawn_local(async move {
-                                if let Ok(sats) = wallet.get_balance().await {
-                                    balance.set(format_balance(sats));
-                                }
-                            });
-                        }
+                wallet.set_operation_listener(Some(Rc::new(move |event| match event {
+                    OperationEvent::PaymentReceived { amount_sats } => {
+                        let msg = match amount_sats {
+                            Some(sats) => format!("Incoming payment of {sats} sats received."),
+                            None => "Incoming payment received.".to_owned(),
+                        };
+                        push_message(&messages, onboarding_message(msg));
+                        let wallet = listener_wallet.clone();
+                        spawn_local(async move {
+                            if let Ok(sats) = wallet.get_balance().await {
+                                balance.set(format_balance(sats));
+                            }
+                        });
                     }
                 })));
                 spawn_local(async move {
@@ -158,33 +168,41 @@ pub fn App() -> impl IntoView {
                         onboarding_message("Creating a PPQ account and funding it with $0.10..."),
                     );
                     match fund_ppq(&wallet, &ppq).await {
-                        Ok(api_key) => match wallet.mark_ppq_ready().await {
+                        Ok(account) => match wallet.mark_ppq_ready().await {
                             Ok(()) => {
                                 agent_cell.borrow_mut().replace(WalletAgent::new(
                                     wallet.clone(),
                                     ppq,
-                                    api_key,
+                                    account.api_key.clone(),
                                     skills.get_untracked(),
                                 ));
+                                ppq_account.set(Some(account.clone()));
+                                start_ppq_balance_watch(
+                                    PpqClient::new(),
+                                    account,
+                                    ppq_low_balance_usd,
+                                    ppq_topup_in_progress,
+                                    Rc::clone(&ppq_topup_grace_until),
+                                );
                                 ready.set(true);
                                 busy.set(false);
                                 status.set("Wallet ready".to_owned());
                                 push_message(
-                                        &messages,
-                        assistant_message(
-                            "Fedigents is ready. Ask me to check balance, create invoices, or prepare a Lightning payment for review.",
-                        ),
-                    );
+                                    &messages,
+                                    assistant_message(
+                                        "Fedigents is ready. Ask me to check balance, create invoices, or prepare a Lightning payment for review.",
+                                    ),
+                                );
                             }
                             Err(err) => {
                                 busy.set(false);
                                 status.set("PPQ setup needs recovery".to_owned());
                                 push_message(
-                                        &messages,
-                                        onboarding_message(format!(
-                                            "PPQ funding completed but the final ready marker could not be saved: {err}. Chat stays locked to avoid double-funding on restart."
-                                        )),
-                                    );
+                                    &messages,
+                                    onboarding_message(format!(
+                                        "PPQ funding completed but the final ready marker could not be saved: {err}. Chat stays locked to avoid double-funding on restart."
+                                    )),
+                                );
                             }
                         },
                         Err(err) => {
@@ -204,9 +222,17 @@ pub fn App() -> impl IntoView {
                             agent_cell.borrow_mut().replace(WalletAgent::new(
                                 wallet.clone(),
                                 ppq,
-                                account.api_key,
+                                account.api_key.clone(),
                                 skills.get_untracked(),
                             ));
+                            ppq_account.set(Some(account.clone()));
+                            start_ppq_balance_watch(
+                                PpqClient::new(),
+                                account,
+                                ppq_low_balance_usd,
+                                ppq_topup_in_progress,
+                                Rc::clone(&ppq_topup_grace_until),
+                            );
                             ready.set(true);
                             busy.set(false);
                             status.set("Wallet ready".to_owned());
@@ -216,9 +242,17 @@ pub fn App() -> impl IntoView {
                                 agent_cell.borrow_mut().replace(WalletAgent::new(
                                     wallet.clone(),
                                     ppq,
-                                    account.api_key,
+                                    account.api_key.clone(),
                                     skills.get_untracked(),
                                 ));
+                                ppq_account.set(Some(account.clone()));
+                                start_ppq_balance_watch(
+                                    PpqClient::new(),
+                                    account,
+                                    ppq_low_balance_usd,
+                                    ppq_topup_in_progress,
+                                    Rc::clone(&ppq_topup_grace_until),
+                                );
                                 ready.set(true);
                                 busy.set(false);
                                 status.set("Wallet ready".to_owned());
@@ -384,6 +418,69 @@ pub fn App() -> impl IntoView {
         scanner_open.update(|open| *open = !*open);
     };
 
+    let top_up_ppq = {
+        let runtime = Rc::clone(&runtime);
+        let ppq_topup_grace_until = Rc::clone(&ppq_topup_grace_until);
+        move |_ev: MouseEvent| {
+            if ppq_topup_in_progress.get_untracked() {
+                return;
+            }
+            let Some(account) = ppq_account.get_untracked() else {
+                push_message(
+                    &messages,
+                    onboarding_message("PPQ account metadata is unavailable."),
+                );
+                return;
+            };
+            let Some(runtime_value) = runtime.borrow().clone() else {
+                push_message(
+                    &messages,
+                    onboarding_message("Wallet runtime is unavailable."),
+                );
+                return;
+            };
+
+            let balance_hint = ppq_low_balance_usd.get_untracked();
+            ppq_topup_in_progress.set(true);
+            let ppq_topup_grace_until = Rc::clone(&ppq_topup_grace_until);
+            spawn_local(async move {
+                let ppq = PpqClient::new();
+                let result = async {
+                    let topup = ppq.create_lightning_topup(&account, PPQ_TOPUP_USD).await?;
+                    runtime_value.pay(&topup.invoice, None).await?;
+                    anyhow::Ok(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => {
+                        *ppq_topup_grace_until.borrow_mut() =
+                            Some(Date::now() + PPQ_TOPUP_GRACE_MS);
+                        ppq_low_balance_usd.set(None);
+                        push_message(
+                            &messages,
+                            onboarding_message(
+                                "PPQ top-up payment sent automatically. Credit balance should refresh shortly.",
+                            ),
+                        );
+                        if let Ok(amount_sats) = runtime_value.get_balance().await {
+                            balance.set(format_balance(amount_sats));
+                        }
+                    }
+                    Err(err) => {
+                        ppq_low_balance_usd.set(balance_hint.or(Some(0.0)));
+                        push_message(
+                            &messages,
+                            onboarding_message(format!("PPQ top-up failed: {err}")),
+                        );
+                    }
+                }
+
+                ppq_topup_in_progress.set(false);
+            });
+        }
+    };
+
     let scan_submit = Rc::clone(&submit_prompt);
     let form_submit = Rc::clone(&submit_prompt);
     let key_submit = Rc::clone(&submit_prompt);
@@ -391,6 +488,25 @@ pub fn App() -> impl IntoView {
     view! {
         <div class="shell">
             <div class="wallet-frame">
+                <div
+                    class="ppq-topup-banner"
+                    style:display=move || if ppq_low_balance_usd.get().is_some() { "grid" } else { "none" }
+                >
+                    <div class="ppq-topup-copy">
+                        <div class="ppq-topup-title">"Low PPQ balance"</div>
+                        <div class="ppq-topup-body">
+                            {move || ppq_low_balance_usd.get().map(|usd| format!("PPQ credit is down to ${usd:.2}. Top up $0.10 now?")).unwrap_or_default()}
+                        </div>
+                    </div>
+                    <button
+                        class="action-button"
+                        type="button"
+                        on:click=top_up_ppq
+                        disabled=move || ppq_topup_in_progress.get()
+                    >
+                        {move || if ppq_topup_in_progress.get() { "Topping up..." } else { "Top up 10c" }}
+                    </button>
+                </div>
                 <header class="topbar">
                     <div class="balance-card">
                         <div class="balance-label">"Balance"</div>
@@ -619,16 +735,47 @@ fn truncate_middle(value: &str, limit: usize) -> String {
     format!("{start}...{end}")
 }
 
-async fn fund_ppq(wallet: &WalletRuntime, ppq: &PpqClient) -> anyhow::Result<String> {
+async fn fund_ppq(wallet: &WalletRuntime, ppq: &PpqClient) -> anyhow::Result<PpqAccount> {
     let account = wallet.ensure_ppq_account().await?;
     let topup = ppq.create_lightning_topup(&account, PPQ_TOPUP_USD).await?;
     wallet.begin_ppq_funding_attempt().await?;
     wallet.pay(&topup.invoice, None).await?;
-    Ok(account.api_key)
+    Ok(account)
+}
+
+fn start_ppq_balance_watch(
+    ppq: PpqClient,
+    account: PpqAccount,
+    ppq_low_balance_usd: RwSignal<Option<f64>>,
+    ppq_topup_in_progress: RwSignal<bool>,
+    ppq_topup_grace_until: Rc<RefCell<Option<f64>>>,
+) {
+    spawn_local(async move {
+        loop {
+            match ppq.balance(&account).await {
+                Ok(balance) => {
+                    let in_grace = ppq_topup_grace_until
+                        .borrow()
+                        .is_some_and(|until| until > Date::now());
+                    if balance.amount_usd >= PPQ_LOW_BALANCE_USD {
+                        *ppq_topup_grace_until.borrow_mut() = None;
+                        ppq_low_balance_usd.set(None);
+                    } else if !ppq_topup_in_progress.get_untracked() && !in_grace {
+                        ppq_low_balance_usd.set(Some(balance.amount_usd));
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("PPQ balance check failed: {err}");
+                }
+            }
+
+            sleep(PPQ_BALANCE_POLL_INTERVAL).await;
+        }
+    });
 }
 
 fn markdown_to_html(input: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{Options, Parser, html};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -639,8 +786,8 @@ fn markdown_to_html(input: &str) -> String {
 }
 
 fn generate_qr_svg(data: &str) -> Option<String> {
-    use qrcode::render::svg;
     use qrcode::QrCode;
+    use qrcode::render::svg;
     let code = QrCode::new(data.as_bytes()).ok()?;
     Some(
         code.render::<svg::Color>()

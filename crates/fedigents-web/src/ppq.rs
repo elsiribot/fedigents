@@ -1,7 +1,7 @@
 use fedimint_core::encoding::{Decodable, Encodable};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const API_BASE: &str = "https://api.ppq.ai";
 
@@ -14,6 +14,11 @@ pub struct PpqAccount {
 #[derive(Clone, Debug)]
 pub struct PpqTopup {
     pub invoice: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PpqBalance {
+    pub amount_usd: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -85,6 +90,23 @@ impl PpqClient {
         Ok(PpqTopup {
             invoice: invoice.to_owned(),
         })
+    }
+
+    pub async fn balance(&self, account: &PpqAccount) -> anyhow::Result<PpqBalance> {
+        let response = self
+            .client
+            .post(format!("{API_BASE}/credits/balance"))
+            .json(&json!({
+                "credit_id": account.credit_id,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let body: Value = response.json().await?;
+        let object = unwrap_data(&body);
+        let amount_usd = get_f64(object, &["balance", "usd_balance", "amount", "credits"])?;
+        Ok(PpqBalance { amount_usd })
     }
 
     pub async fn chat(&self, api_key: &str, messages: &[PpqMessage]) -> anyhow::Result<String> {
@@ -163,6 +185,25 @@ fn get_string<'a>(value: &'a Value, keys: &[&str]) -> anyhow::Result<&'a str> {
     }
     Err(anyhow::anyhow!(
         "Missing expected PPQ field; looked for one of: {}",
+        keys.join(", ")
+    ))
+}
+
+fn get_f64(value: &Value, keys: &[&str]) -> anyhow::Result<f64> {
+    for key in keys {
+        if let Some(found) = value.get(key) {
+            if let Some(number) = found.as_f64() {
+                return Ok(number);
+            }
+            if let Some(text) = found.as_str() {
+                if let Ok(number) = text.parse::<f64>() {
+                    return Ok(number);
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Missing expected numeric PPQ field; looked for one of: {}",
         keys.join(", ")
     ))
 }

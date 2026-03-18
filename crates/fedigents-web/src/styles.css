@@ -95,6 +95,34 @@ input {
   border-bottom: 1px solid var(--color-extra-light-grey);
 }
 
+.ppq-topup-banner {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--spacing-md);
+  align-items: center;
+  padding: var(--spacing-md);
+  border-bottom: 1px solid var(--color-extra-light-grey);
+  background: rgba(223, 123, 0, 0.1);
+}
+
+.ppq-topup-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.ppq-topup-title {
+  font-size: var(--font-size-small);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-orange);
+}
+
+.ppq-topup-body {
+  font-size: var(--font-size-caption);
+  color: var(--color-primary);
+}
+
 .balance-card {
   display: flex;
   flex-direction: column;
