@@ -27,8 +27,8 @@ use fedimint_ln_client::{
     LightningClientInit, LightningClientModule, LightningOperationMeta,
     LightningOperationMetaVariant, LnPayState, LnReceiveState,
 };
-use fedimint_meta_client::MetaClientInit;
-use fedimint_meta_common::DEFAULT_META_KEY;
+use fedimint_client::meta::MetaService;
+use fedimint_meta_client::{MetaClientInit, MetaModuleMetaSourceWithFallback};
 use fedimint_mint_client::MintClientInit;
 use fedimint_wallet_client::WalletClientInit;
 use futures::StreamExt;
@@ -36,7 +36,6 @@ use wasm_bindgen_futures::spawn_local;
 use gloo_storage::{LocalStorage, Storage};
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::info;
 
 use crate::browser;
@@ -204,6 +203,7 @@ impl WalletRuntimeCore {
                 Some(receive_code)
             }
             Err(err) => {
+                info!("LNURL receive setup failed: {err:#}");
                 on_event(BootstrapEvent::Note(format!(
                     "LNURL receive setup is unavailable in this federation right now ({err}). Falling back to a starter invoice."
                 )));
@@ -560,6 +560,8 @@ impl WalletRuntimeCore {
         builder.with_module(LightningClientInit::default());
         builder.with_module(WalletClientInit(None));
         builder.with_module(MetaClientInit);
+        let meta_source: MetaModuleMetaSourceWithFallback = Default::default();
+        builder.with_meta_service(MetaService::new(meta_source));
         Ok(builder)
     }
 
@@ -603,6 +605,7 @@ impl WalletRuntimeCore {
             }
         } else {
             let recurringd_api = self.lookup_recurringd_api(client).await?;
+            info!("Registering recurring payment code with recurringd: {recurringd_api}");
             let meta = serde_json::to_string(&serde_json::json!([[
                 "text/plain",
                 "Deposit into your Fedigents wallet"
@@ -613,7 +616,11 @@ impl WalletRuntimeCore {
                     recurringd_api,
                     &meta,
                 )
-                .await?;
+                .await
+                .map_err(|e| {
+                    info!("register_recurring_payment_code failed: {e:#}");
+                    e
+                })?;
             let payment_code_idx = ln
                 .list_recurring_payment_codes()
                 .await
@@ -744,23 +751,19 @@ impl WalletRuntimeCore {
     }
 
     async fn lookup_recurringd_api(&self, client: &Rc<ClientHandle>) -> anyhow::Result<SafeUrl> {
-        let meta = client
-            .get_first_module::<fedimint_meta_client::MetaClientModule>()?
-            .inner();
-        let value = meta
-            .get_consensus_value(DEFAULT_META_KEY)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Federation meta values are unavailable"))?
-            .value
-            .to_json_lossy()?;
-
-        let recurringd_api = value
-            .as_object()
-            .and_then(|map| map.get("recurringd_api"))
-            .and_then(Value::as_str)
+        let recurringd_api: String = client
+            .meta_service()
+            .get_field(&client.db(), "recurringd_api")
+            .await
+            .and_then(|meta| meta.value)
             .ok_or_else(|| anyhow::anyhow!("Federation meta does not expose `recurringd_api`"))?;
+        let recurringd_api = recurringd_api.trim_matches('"').to_owned();
 
-        SafeUrl::from_str(recurringd_api).map_err(Into::into)
+        info!("recurringd_api: {:?} (bytes: {:?})", recurringd_api, recurringd_api.as_bytes());
+        SafeUrl::from_str(&recurringd_api).map_err(|e| {
+            info!("SafeUrl::from_str failed: {e}");
+            e.into()
+        })
     }
 
     async fn wait_for_first_deposit<F>(

@@ -15,10 +15,10 @@ mod wallet_runtime;
 #[cfg(target_family = "wasm")]
 fn main() {
     console_error_panic_hook::set_once();
+    tracing_wasm::set_as_global_default();
     if wallet_runtime::run_worker_entrypoint() {
         return;
     }
-    tracing_wasm::set_as_global_default();
     leptos::mount::mount_to_body(app::App);
 }
 
