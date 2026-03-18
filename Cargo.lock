@@ -1483,6 +1483,7 @@ dependencies = [
  "gloo-timers 0.3.0",
  "js-sys",
  "leptos",
+ "leptos-qr-scanner",
  "lightning-invoice",
  "pulldown-cmark",
  "qrcode",
@@ -3645,6 +3646,18 @@ dependencies = [
  "throw_error",
  "typed-builder",
  "typed-builder-macro",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "leptos-qr-scanner"
+version = "0.3.0"
+source = "git+https://github.com/elsirion/leptos-qr-scanner?rev=cfaa12752ec75f66355c9ef5d9e97d2f64e231fd#cfaa12752ec75f66355c9ef5d9e97d2f64e231fd"
+dependencies = [
+ "js-sys",
+ "leptos",
+ "serde",
  "wasm-bindgen",
  "web-sys",
 ]
