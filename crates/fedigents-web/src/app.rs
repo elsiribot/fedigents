@@ -527,8 +527,8 @@ pub fn App() -> impl IntoView {
                     </div>
                 </footer>
 
-                <div style:display=move || if scanner_open.get() { "flex" } else { "none" } class="scanner-overlay">
-                    <div class="scanner-card">
+                <div style:display=move || if scanner_open.get() { "flex" } else { "none" } class="scanner-overlay" on:click=move |_| scanner_open.set(false)>
+                    <div class="scanner-card" on:click=move |ev: MouseEvent| ev.stop_propagation()>
                         <Scan
                             active=scanner_open
                             on_scan=move |data: String| {

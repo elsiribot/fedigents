@@ -548,6 +548,16 @@ input {
   width: 100%;
   max-width: 320px;
   align-items: center;
+  color: var(--color-white);
+}
+
+.scanner-card .secondary-button {
+  color: var(--color-white);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.scanner-card .secondary-button:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .scanner-video {
