@@ -51,6 +51,7 @@ pub fn App() -> impl IntoView {
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
     let scanner_open = RwSignal::new(false);
     let debug_mode = RwSignal::new(false);
+    let menu_open = RwSignal::new(false);
     let ppq_account = RwSignal::new(None::<PpqAccount>);
     let ppq_low_balance_usd = RwSignal::new(None::<f64>);
     let ppq_topup_in_progress = RwSignal::new(false);
@@ -526,70 +527,93 @@ pub fn App() -> impl IntoView {
                     </button>
                 </div>
                 <header class="topbar">
+                    <div class="menu-wrapper">
+                        <button class="menu-button" title="Menu" on:click=move |_| menu_open.update(|v| *v = !*v)>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="3" y1="6" x2="21" y2="6"/>
+                                <line x1="3" y1="12" x2="21" y2="12"/>
+                                <line x1="3" y1="18" x2="21" y2="18"/>
+                            </svg>
+                        </button>
+                        {move || menu_open.get().then(|| {
+                            let load_session_handler = move |selected: String| {
+                                if let Some(session) = load_session(&selected) {
+                                    save_session(&StoredSession {
+                                        id: session_id.get_untracked(),
+                                        created_at: session_created_at.get_untracked(),
+                                        conversation: conversation.get_untracked(),
+                                        display_messages: messages.get_untracked(),
+                                    });
+                                    session_id.set(session.id);
+                                    session_created_at.set(session.created_at);
+                                    conversation.set(session.conversation);
+                                    messages.set(session.display_messages);
+                                    pending_payment.set(None);
+                                    menu_open.set(false);
+                                }
+                            };
+                            view! {
+                                <div class="menu-panel">
+                                    <button class="new-session-button" on:click=move |_| {
+                                        save_session(&StoredSession {
+                                            id: session_id.get_untracked(),
+                                            created_at: session_created_at.get_untracked(),
+                                            conversation: conversation.get_untracked(),
+                                            display_messages: messages.get_untracked(),
+                                        });
+                                        let new_id = format!("fedigents.session.{}", Date::now() as u64);
+                                        session_id.set(new_id);
+                                        session_created_at.set(Date::now());
+                                        conversation.set(ConversationLog::new());
+                                        messages.set(vec![onboarding_message("New session started.")]);
+                                        pending_payment.set(None);
+                                        sessions_index.set(load_sessions_index());
+                                        menu_open.set(false);
+                                    }>"+ New session"</button>
+                                    <div class="menu-section-label">"Past Sessions"</div>
+                                    <div class="session-list">
+                                        {move || sessions_index.get().into_iter().rev().map(|entry| {
+                                            let id = entry.id.clone();
+                                            let label = entry.preview.clone();
+                                            let handler = load_session_handler.clone();
+                                            view! {
+                                                <button class="session-item" on:click=move |_| handler(id.clone())>
+                                                    {label}
+                                                </button>
+                                            }
+                                        }).collect_view()}
+                                    </div>
+                                    <div class="menu-divider"/>
+                                    <label class="debug-toggle">
+                                        <input type="checkbox"
+                                            prop:checked=move || debug_mode.get()
+                                            on:change=move |_| debug_mode.update(|v| *v = !*v)
+                                        />
+                                        "Debug"
+                                    </label>
+                                </div>
+                            }
+                        })}
+                    </div>
+
                     <div class="balance-card">
                         <div class="balance-label">"Balance"</div>
                         <div class="balance-value">{move || balance.get()}</div>
                         <div class="meta-text">{move || status.get()}</div>
                     </div>
 
-                    <div class="topbar-center">
-                        <select
-                            class="session-select"
-                            on:change=move |ev| {
-                                let selected = event_target_value(&ev);
-                                if selected == "new" {
-                                    // Save current session first
-                                    save_session(&StoredSession {
-                                        id: session_id.get_untracked(),
-                                        created_at: session_created_at.get_untracked(),
-                                        conversation: conversation.get_untracked(),
-                                        display_messages: messages.get_untracked(),
-                                    });
-                                    // Start fresh
-                                    let new_id = format!("fedigents.session.{}", Date::now() as u64);
-                                    session_id.set(new_id);
-                                    session_created_at.set(Date::now());
-                                    conversation.set(ConversationLog::new());
-                                    messages.set(vec![onboarding_message("New session started.")]);
-                                    pending_payment.set(None);
-                                    sessions_index.set(load_sessions_index());
-                                } else if let Some(session) = load_session(&selected) {
-                                    // Save current session first
-                                    save_session(&StoredSession {
-                                        id: session_id.get_untracked(),
-                                        created_at: session_created_at.get_untracked(),
-                                        conversation: conversation.get_untracked(),
-                                        display_messages: messages.get_untracked(),
-                                    });
-                                    // Load selected session
-                                    session_id.set(session.id);
-                                    session_created_at.set(session.created_at);
-                                    conversation.set(session.conversation);
-                                    messages.set(session.display_messages);
-                                    pending_payment.set(None);
-                                }
-                            }
-                        >
-                            <option value="" selected=true disabled=true>"Sessions"</option>
-                            <option value="new">"+ New session"</option>
-                            {move || sessions_index.get().into_iter().map(|entry| {
-                                let id = entry.id.clone();
-                                let label = entry.preview.clone();
-                                view! { <option value=id>{label}</option> }
-                            }).collect_view()}
-                        </select>
-                        <label class="debug-toggle">
-                            <input type="checkbox"
-                                prop:checked=move || debug_mode.get()
-                                on:change=move |_| debug_mode.update(|v| *v = !*v)
-                            />
-                            "Debug"
-                        </label>
-                    </div>
-
-                    <button class="scan-button" on:click=toggle_scan disabled=move || busy.get()>
-                        <span>"Scan QR"</span>
-                        <span aria-hidden="true">"[]"</span>
+                    <button class="scan-button" on:click=toggle_scan disabled=move || busy.get() title="Scan QR">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="2" width="8" height="8" rx="1"/>
+                            <rect x="14" y="2" width="8" height="8" rx="1"/>
+                            <rect x="2" y="14" width="8" height="8" rx="1"/>
+                            <rect x="14" y="14" width="4" height="4" rx="0.5"/>
+                            <line x1="22" y1="14" x2="22" y2="22"/>
+                            <line x1="14" y1="22" x2="22" y2="22"/>
+                            <rect x="5" y="5" width="2" height="2"/>
+                            <rect x="17" y="5" width="2" height="2"/>
+                            <rect x="5" y="17" width="2" height="2"/>
+                        </svg>
                     </button>
                 </header>
 
