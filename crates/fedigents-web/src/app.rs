@@ -528,15 +528,17 @@ pub fn App() -> impl IntoView {
                 </footer>
             </div>
 
-            <Scan
-                active=scanner_open
-                on_scan=move |data: String| {
-                    scanner_open.set(false);
-                    scan_submit(data);
-                }
-                class="modal-shell"
-                video_class="scanner-video"
-            />
+            <div style:display=move || if scanner_open.get() { "grid" } else { "none" } class="modal-shell">
+                <Scan
+                    active=scanner_open
+                    on_scan=move |data: String| {
+                        scanner_open.set(false);
+                        scan_submit(data);
+                    }
+                    class=""
+                    video_class="scanner-video"
+                />
+            </div>
         </div>
     }
 }
