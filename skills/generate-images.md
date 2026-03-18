@@ -96,7 +96,7 @@ http_request
 
 ### Response
 
-The response contains `data[].url` with signed image URLs. Return them as markdown images so the user sees them inline. Mention that signed URLs expire after ~24 hours.
+The response contains `data[].url` with signed image URLs. Return them as markdown images so the user sees them inline. Always remind the user to download/save the image since the link expires in 24 hours.
 
 Example response:
 ```json
