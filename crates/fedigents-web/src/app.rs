@@ -2,10 +2,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use leptos::ev::{KeyboardEvent, MouseEvent, SubmitEvent};
-use leptos::html::{Textarea, Video};
+use leptos::html::Textarea;
 use leptos::prelude::*;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen::JsCast;
+use leptos_qr_scanner::Scan;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlTextAreaElement;
 
@@ -36,9 +35,7 @@ pub fn App() -> impl IntoView {
     let confirming_payment = RwSignal::new(false);
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
     let scanner_open = RwSignal::new(false);
-    let scanner_error = RwSignal::new(None::<String>);
     let debug_mode = RwSignal::new(false);
-    let video_ref = NodeRef::<Video>::new();
     let textarea_ref = NodeRef::<Textarea>::new();
 
     let effect_runtime = Rc::clone(&runtime);
@@ -382,53 +379,15 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    let start_scan = {
-        move |_ev: MouseEvent| {
-            scanner_open.set(true);
-            scanner_error.set(None);
-            let Some(video) = video_ref.get_untracked() else {
-                scanner_error.set(Some("Camera surface is not ready yet.".to_owned()));
-                return;
-            };
-
-            let prompt = prompt;
-            let messages = messages;
-            let callback = Closure::wrap(Box::new(move |value: wasm_bindgen::JsValue| {
-                if let Some(scanned) = value.as_string() {
-                    prompt.set(scanned.clone());
-                    push_message(
-                        &messages,
-                        onboarding_message(
-                            "QR code scanned. Review the prompt or send it directly.",
-                        ),
-                    );
-                }
-            }) as Box<dyn FnMut(_)>);
-
-            let function: js_sys::Function = callback.as_ref().clone().unchecked_into();
-            callback.forget();
-            spawn_local(async move {
-                if let Err(err) = browser::begin_qr_scanner(&video, &function).await {
-                    push_message(
-                        &messages,
-                        onboarding_message(format!("QR scanner error: {err}")),
-                    );
-                }
-            });
-        }
+    let toggle_scan = move |_ev: MouseEvent| {
+        scanner_open.update(|open| *open = !*open);
     };
 
-    let stop_scan = {
-        move |_ev: MouseEvent| {
-            scanner_open.set(false);
-            scanner_error.set(None);
-            if let Some(video) = video_ref.get_untracked() {
-                spawn_local(async move {
-                    let _ = browser::end_qr_scanner(&video).await;
-                });
-            }
-        }
-    };
+    let scan_submit = Rc::clone(&submit_prompt);
+    let on_scan: Rc<dyn Fn(String)> = Rc::new(move |data: String| {
+        scanner_open.set(false);
+        scan_submit(data);
+    });
 
     let form_submit = Rc::clone(&submit_prompt);
     let key_submit = Rc::clone(&submit_prompt);
@@ -451,7 +410,7 @@ pub fn App() -> impl IntoView {
                         "Debug"
                     </label>
 
-                    <button class="scan-button" on:click=start_scan disabled=move || busy.get()>
+                    <button class="scan-button" on:click=toggle_scan disabled=move || busy.get()>
                         <span>"Scan QR"</span>
                         <span aria-hidden="true">"[]"</span>
                     </button>
@@ -574,21 +533,17 @@ pub fn App() -> impl IntoView {
             </div>
 
             <Show when=move || scanner_open.get()>
-                <div class="modal-shell">
-                    <div class="modal-card">
-                        <div class="message-role">"QR Scanner"</div>
-                        <p>
-                            "Chromium camera scanning uses BarcodeDetector. If scanning fails, you can still paste the invoice or LNURL into chat."
-                        </p>
-                        <video class="scanner-video" autoplay=true playsinline=true node_ref=video_ref></video>
-                        {move || scanner_error.get().map(|err| view! { <div class="status-banner">{err}</div> })}
-                        <div class="modal-actions">
-                            <button class="secondary-button" on:click=stop_scan>
-                                "Close"
-                            </button>
-                        </div>
-                    </div>
-                </div>
+                {
+                    let on_scan = Rc::clone(&on_scan);
+                    view! {
+                        <Scan
+                            active=scanner_open
+                            on_scan=move |data| on_scan(data)
+                            class="modal-shell"
+                            video_class="scanner-video"
+                        />
+                    }
+                }
             </Show>
         </div>
     }

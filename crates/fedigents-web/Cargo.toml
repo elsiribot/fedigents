@@ -24,6 +24,7 @@ gloo-storage = "0.3.0"
 gloo-timers = { version = "0.3.0", features = ["futures"] }
 js-sys = "0.3.77"
 leptos = { version = "0.7.8", default-features = false, features = ["csr"] }
+leptos-qr-scanner = { git = "https://github.com/elsirion/leptos-qr-scanner", rev = "master" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rig-core = { version = "0.30", default-features = false, features = ["wasm"] }
@@ -47,11 +48,7 @@ web-sys = { version = "0.3.77", features = [
   "DedicatedWorkerGlobalScope",
   "HtmlInputElement",
   "HtmlTextAreaElement",
-  "HtmlVideoElement",
   "MessageEvent",
-  "MediaDevices",
-  "MediaStream",
-  "MediaStreamTrack",
   "Navigator",
   "ServiceWorkerContainer",
   "StorageManager",
