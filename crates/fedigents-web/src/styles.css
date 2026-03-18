@@ -147,11 +147,35 @@ input {
   gap: 6px;
   font-size: var(--font-size-small);
   color: var(--color-grey);
-  cursor: pointer;
   user-select: none;
 }
 
-.topbar-center input[type="checkbox"] {
+.session-select {
+  font: inherit;
+  font-size: var(--font-size-small);
+  color: var(--color-grey);
+  background: transparent;
+  border: 1px solid var(--color-light-grey);
+  border-radius: 8px;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  cursor: pointer;
+  max-width: 120px;
+  text-overflow: ellipsis;
+}
+
+.session-select:focus {
+  outline: 1px solid var(--color-blue);
+  color: var(--color-primary);
+}
+
+.debug-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.debug-toggle input[type="checkbox"] {
   width: 16px;
   height: 16px;
   cursor: pointer;

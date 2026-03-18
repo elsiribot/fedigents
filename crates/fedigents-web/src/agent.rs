@@ -6,7 +6,8 @@ use anyhow::Context;
 use gloo_storage::{LocalStorage, Storage};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
-use rig::completion::{Chat, Message, ToolDefinition};
+use rig::agent::PromptRequest;
+use rig::completion::{Message, ToolDefinition};
 use rig::prelude::*;
 use rig::providers::openai;
 use rig::tool::{ToolDyn, ToolError};
@@ -20,6 +21,8 @@ use crate::wallet_runtime::WalletRuntime;
 const PPQ_API_BASE: &str = "https://api.ppq.ai";
 const MODEL: &str = "openai/gpt-5.4-nano";
 const CUSTOM_SKILLS_KEY: &str = "fedigents.skills.custom";
+const KV_PREFIX: &str = "fedigents.kv.";
+const SESSIONS_INDEX_KEY: &str = "fedigents.sessions";
 
 const PREAMBLE: &str = "\
 You are the wallet agent inside a chat-only Fedimint wallet. \
@@ -82,8 +85,73 @@ pub struct PendingPaymentProposal {
 
 #[derive(Clone, Debug)]
 pub struct AgentResponse {
-    pub messages: Vec<ChatMessage>,
+    pub display_messages: Vec<ChatMessage>,
+    pub conversation: ConversationLog,
     pub pending_payment: Option<PendingPaymentProposal>,
+}
+
+/// Opaque wrapper around rig's native message history. Serializable for
+/// persistence in localStorage. Passed to `WalletAgent::respond()` so the
+/// model gets proper tool-call/result replay across turns.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ConversationLog(Vec<Message>);
+
+impl ConversationLog {
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionEntry {
+    pub id: String,
+    pub created_at: f64,
+    pub preview: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StoredSession {
+    pub id: String,
+    pub created_at: f64,
+    pub conversation: ConversationLog,
+    pub display_messages: Vec<ChatMessage>,
+}
+
+pub fn load_sessions_index() -> Vec<SessionEntry> {
+    LocalStorage::get::<Vec<SessionEntry>>(SESSIONS_INDEX_KEY).unwrap_or_default()
+}
+
+pub fn save_session(session: &StoredSession) {
+    let _ = LocalStorage::set(&session.id, session);
+
+    let mut index = load_sessions_index();
+    let preview = session
+        .display_messages
+        .iter()
+        .find(|m| matches!(m.role, ChatRole::User))
+        .map(|m| {
+            let s: String = m.body.chars().take(50).collect();
+            if m.body.chars().count() > 50 {
+                format!("{s}...")
+            } else {
+                s
+            }
+        })
+        .unwrap_or_else(|| "New session".to_owned());
+
+    match index.iter_mut().find(|e| e.id == session.id) {
+        Some(entry) => entry.preview = preview,
+        None => index.push(SessionEntry {
+            id: session.id.clone(),
+            created_at: session.created_at,
+            preview,
+        }),
+    }
+    let _ = LocalStorage::set(SESSIONS_INDEX_KEY, &index);
+}
+
+pub fn load_session(id: &str) -> Option<StoredSession> {
+    LocalStorage::get::<StoredSession>(id).ok()
 }
 
 struct ToolLog {
@@ -796,7 +864,8 @@ fn kv_store(
         "set" => {
             let key = key.ok_or_else(|| anyhow::anyhow!("kv_store set requires a key"))?;
             let value = value.ok_or_else(|| anyhow::anyhow!("kv_store set requires a value"))?;
-            LocalStorage::set(key, &value)?;
+            let storage_key = format!("{KV_PREFIX}{key}");
+            LocalStorage::set(&storage_key, &value)?;
             Ok(json!({
                 "action": "set",
                 "key": key,
@@ -806,7 +875,8 @@ fn kv_store(
         }
         "get" => {
             let key = key.ok_or_else(|| anyhow::anyhow!("kv_store get requires a key"))?;
-            let value = LocalStorage::get::<serde_json::Value>(key).ok();
+            let storage_key = format!("{KV_PREFIX}{key}");
+            let value = LocalStorage::get::<serde_json::Value>(&storage_key).ok();
             Ok(json!({
                 "action": "get",
                 "key": key,
@@ -817,7 +887,8 @@ fn kv_store(
         }
         "delete" => {
             let key = key.ok_or_else(|| anyhow::anyhow!("kv_store delete requires a key"))?;
-            LocalStorage::delete(key);
+            let storage_key = format!("{KV_PREFIX}{key}");
+            LocalStorage::delete(&storage_key);
             Ok(json!({
                 "action": "delete",
                 "key": key,
@@ -826,7 +897,15 @@ fn kv_store(
             .to_string())
         }
         "list" => {
-            let keys = list_local_storage_keys(prefix.as_deref())?;
+            let full_prefix = match &prefix {
+                Some(p) => format!("{KV_PREFIX}{p}"),
+                None => KV_PREFIX.to_owned(),
+            };
+            let raw_keys = list_local_storage_keys(Some(&full_prefix))?;
+            let keys: Vec<String> = raw_keys
+                .into_iter()
+                .filter_map(|k| k.strip_prefix(KV_PREFIX).map(str::to_owned))
+                .collect();
             Ok(json!({
                 "action": "list",
                 "prefix": prefix,
@@ -980,29 +1059,14 @@ impl WalletAgent {
 
     pub async fn respond(
         &self,
-        history: &[ChatMessage],
+        conversation: &ConversationLog,
         prompt: &str,
     ) -> anyhow::Result<AgentResponse> {
         let log = ToolLog::new();
 
         let skills = load_skills().await.unwrap_or_else(|_| self.skills.clone());
         let skills_ctx = render_skills_prompt(&skills);
-
-        // Extract previously loaded skill prompts from history so the model
-        // retains skill instructions across turns without re-loading.
-        let loaded_skills: String = history
-            .iter()
-            .filter_map(|m| match m.role {
-                ChatRole::Tool => m.body.strip_prefix("load_skill => "),
-                _ => None,
-            })
-            .fold(String::new(), |mut acc, prompt| {
-                acc.push_str("\n\n--- Loaded skill ---\n");
-                acc.push_str(prompt);
-                acc
-            });
-
-        let preamble = format!("{PREAMBLE}\n\n{skills_ctx}{loaded_skills}");
+        let preamble = format!("{PREAMBLE}\n\n{skills_ctx}");
 
         let client: openai::CompletionsClient = openai::CompletionsClient::builder()
             .api_key(&self.ppq_api_key)
@@ -1059,37 +1123,25 @@ impl WalletAgent {
             .tools(tools)
             .build();
 
-        // The caller already passes the latest user message as `prompt`, so
-        // strip it from the tail of history to avoid duplicate user messages
-        // (which some providers like Azure/OpenAI reject).
-        let history_without_current = match history.last() {
-            Some(m) if matches!(m.role, ChatRole::User) => &history[..history.len() - 1],
-            _ => history,
-        };
+        // Clone the prior conversation so rig can mutate it with the full
+        // exchange (user prompt, tool calls/results, final assistant reply).
+        let mut chat_history = conversation.0.clone();
 
-        let chat_history = history_without_current
-            .iter()
-            .filter_map(|m| match m.role {
-                ChatRole::User => Some(Message::user(m.body.clone())),
-                ChatRole::Assistant => Some(Message::assistant(m.body.clone())),
-                ChatRole::Tool => Some(Message::user(format!("[tool output] {}", m.body))),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-
-        let response = agent
-            .chat(prompt, chat_history)
+        let response = PromptRequest::new(&agent, Message::user(prompt.to_owned()))
+            .with_history(&mut chat_history)
+            .max_turns(10)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let mut outputs = log.outputs.take();
-        outputs.push(ChatMessage {
+        let mut display = log.outputs.take();
+        display.push(ChatMessage {
             role: ChatRole::Assistant,
             body: response,
         });
 
         Ok(AgentResponse {
-            messages: outputs,
+            display_messages: display,
+            conversation: ConversationLog(chat_history),
             pending_payment: log.pending_payment.take(),
         })
     }

@@ -13,8 +13,9 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlTextAreaElement;
 
 use crate::agent::{
-    ChatMessage, ChatRole, PendingPaymentProposal, SkillSummary, WalletAgent, assistant_message,
-    load_skills, onboarding_message, user_message,
+    assistant_message, load_session, load_sessions_index, load_skills, onboarding_message,
+    save_session, user_message, ChatMessage, ChatRole, ConversationLog, PendingPaymentProposal,
+    SkillSummary, StoredSession, WalletAgent,
 };
 use crate::browser;
 use crate::ppq::{PpqAccount, PpqClient};
@@ -27,6 +28,13 @@ const PPQ_TOPUP_GRACE_MS: f64 = 120_000.0;
 
 #[component]
 pub fn App() -> impl IntoView {
+    let session_id = RwSignal::new(format!(
+        "fedigents.session.{}",
+        Date::now() as u64
+    ));
+    let session_created_at = RwSignal::new(Date::now());
+    let conversation = RwSignal::new(ConversationLog::new());
+    let sessions_index = RwSignal::new(load_sessions_index());
     let messages = RwSignal::new(vec![onboarding_message(
         "Booting Fedigents. Opening local wallet storage.",
     )]);
@@ -314,7 +322,7 @@ pub fn App() -> impl IntoView {
 
             prompt.set(String::new());
             push_message(&messages, user_message(trimmed.clone()));
-            let history = messages.get_untracked();
+            let conv = conversation.get_untracked();
             let Some(agent_value) = agent.borrow().clone() else {
                 push_message(
                     &messages,
@@ -326,12 +334,22 @@ pub fn App() -> impl IntoView {
 
             let runtime_cell = Rc::clone(&runtime);
             spawn_local(async move {
-                match agent_value.respond(&history, &trimmed).await {
+                match agent_value.respond(&conv, &trimmed).await {
                     Ok(response) => {
                         pending_payment.set(response.pending_payment);
-                        for message in response.messages {
+                        conversation.set(response.conversation);
+                        for message in response.display_messages {
                             push_message(&messages, message);
                         }
+                        // Persist session
+                        save_session(&StoredSession {
+                            id: session_id.get_untracked(),
+                            created_at: session_created_at.get_untracked(),
+                            conversation: conversation.get_untracked(),
+                            display_messages: messages.get_untracked(),
+                        });
+                        sessions_index.set(load_sessions_index());
+                        // Refresh balance
                         let runtime_value = runtime_cell.borrow().clone();
                         if let Some(runtime_value) = runtime_value {
                             if let Ok(amount_sats) = runtime_value.get_balance().await {
@@ -514,13 +532,60 @@ pub fn App() -> impl IntoView {
                         <div class="meta-text">{move || status.get()}</div>
                     </div>
 
-                    <label class="topbar-center">
-                        <input type="checkbox"
-                            prop:checked=move || debug_mode.get()
-                            on:change=move |_| debug_mode.update(|v| *v = !*v)
-                        />
-                        "Debug"
-                    </label>
+                    <div class="topbar-center">
+                        <select
+                            class="session-select"
+                            on:change=move |ev| {
+                                let selected = event_target_value(&ev);
+                                if selected == "new" {
+                                    // Save current session first
+                                    save_session(&StoredSession {
+                                        id: session_id.get_untracked(),
+                                        created_at: session_created_at.get_untracked(),
+                                        conversation: conversation.get_untracked(),
+                                        display_messages: messages.get_untracked(),
+                                    });
+                                    // Start fresh
+                                    let new_id = format!("fedigents.session.{}", Date::now() as u64);
+                                    session_id.set(new_id);
+                                    session_created_at.set(Date::now());
+                                    conversation.set(ConversationLog::new());
+                                    messages.set(vec![onboarding_message("New session started.")]);
+                                    pending_payment.set(None);
+                                    sessions_index.set(load_sessions_index());
+                                } else if let Some(session) = load_session(&selected) {
+                                    // Save current session first
+                                    save_session(&StoredSession {
+                                        id: session_id.get_untracked(),
+                                        created_at: session_created_at.get_untracked(),
+                                        conversation: conversation.get_untracked(),
+                                        display_messages: messages.get_untracked(),
+                                    });
+                                    // Load selected session
+                                    session_id.set(session.id);
+                                    session_created_at.set(session.created_at);
+                                    conversation.set(session.conversation);
+                                    messages.set(session.display_messages);
+                                    pending_payment.set(None);
+                                }
+                            }
+                        >
+                            <option value="" selected=true disabled=true>"Sessions"</option>
+                            <option value="new">"+ New session"</option>
+                            {move || sessions_index.get().into_iter().map(|entry| {
+                                let id = entry.id.clone();
+                                let label = entry.preview.clone();
+                                view! { <option value=id>{label}</option> }
+                            }).collect_view()}
+                        </select>
+                        <label class="debug-toggle">
+                            <input type="checkbox"
+                                prop:checked=move || debug_mode.get()
+                                on:change=move |_| debug_mode.update(|v| *v = !*v)
+                            />
+                            "Debug"
+                        </label>
+                    </div>
 
                     <button class="scan-button" on:click=toggle_scan disabled=move || busy.get()>
                         <span>"Scan QR"</span>
@@ -775,7 +840,7 @@ fn start_ppq_balance_watch(
 }
 
 fn markdown_to_html(input: &str) -> String {
-    use pulldown_cmark::{Options, Parser, html};
+    use pulldown_cmark::{html, Options, Parser};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
@@ -786,8 +851,8 @@ fn markdown_to_html(input: &str) -> String {
 }
 
 fn generate_qr_svg(data: &str) -> Option<String> {
-    use qrcode::QrCode;
     use qrcode::render::svg;
+    use qrcode::QrCode;
     let code = QrCode::new(data.as_bytes()).ok()?;
     Some(
         code.render::<svg::Color>()
@@ -822,8 +887,18 @@ fn extract_payable_strings(text: &str) -> Vec<String> {
 }
 
 fn event_target_value(ev: &web_sys::Event) -> String {
-    ev.target()
-        .and_then(|target| target.dyn_into::<HtmlTextAreaElement>().ok())
-        .map(|input: HtmlTextAreaElement| input.value())
-        .unwrap_or_default()
+    let target = match ev.target() {
+        Some(t) => t,
+        None => return String::new(),
+    };
+    if let Ok(el) = target.clone().dyn_into::<HtmlTextAreaElement>() {
+        return el.value();
+    }
+    if let Ok(el) = target.clone().dyn_into::<web_sys::HtmlSelectElement>() {
+        return el.value();
+    }
+    if let Ok(el) = target.dyn_into::<web_sys::HtmlInputElement>() {
+        return el.value();
+    }
+    String::new()
 }
