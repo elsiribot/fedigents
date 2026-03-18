@@ -23,7 +23,10 @@ use fedimint_derive_secret::{ChildId, DerivableSecret};
 use fedimint_eventlog::EventLogId;
 use fedimint_ln_client::get_invoice;
 use fedimint_ln_client::recurring::{RecurringInvoiceCreatedEvent, RecurringPaymentProtocol};
-use fedimint_ln_client::{LightningClientInit, LightningClientModule, LnReceiveState};
+use fedimint_ln_client::{
+    LightningClientInit, LightningClientModule, LightningOperationMeta,
+    LightningOperationMetaVariant, LnPayState, LnReceiveState,
+};
 use fedimint_meta_client::MetaClientInit;
 use fedimint_meta_common::DEFAULT_META_KEY;
 use fedimint_mint_client::MintClientInit;
@@ -346,6 +349,86 @@ impl WalletRuntimeCore {
             .operation_log()
             .paginate_operations_rev(limit, None)
             .await;
+
+        // Subscribe to non-final operations so the caching side effect can
+        // resolve them, then give them 200ms to settle.
+        let mut pending = Vec::new();
+        let ln = client
+            .get_first_module::<LightningClientModule>()?
+            .inner();
+        for (key, entry) in &operations {
+            if entry.outcome::<serde_json::Value>().is_some() {
+                continue;
+            }
+            if entry.operation_module_kind() != "ln" {
+                continue;
+            }
+            let operation_id = key.operation_id;
+            let meta = entry.meta::<LightningOperationMeta>();
+            match meta.variant {
+                LightningOperationMetaVariant::Receive { .. } => {
+                    if let Ok(sub) = ln.subscribe_ln_receive(operation_id).await {
+                        pending.push(Box::pin(async move {
+                            let mut stream = sub.into_stream();
+                            while let Some(state) = stream.next().await {
+                                match state {
+                                    LnReceiveState::Claimed
+                                    | LnReceiveState::Canceled { .. } => break,
+                                    _ => {}
+                                }
+                            }
+                        })
+                            as std::pin::Pin<Box<dyn futures::Future<Output = ()>>>);
+                    }
+                }
+                LightningOperationMetaVariant::RecurringPaymentReceive { .. } => {
+                    if let Ok(sub) = ln.subscribe_ln_recurring_receive(operation_id).await {
+                        pending.push(Box::pin(async move {
+                            let mut stream = sub.into_stream();
+                            while let Some(state) = stream.next().await {
+                                match state {
+                                    LnReceiveState::Claimed
+                                    | LnReceiveState::Canceled { .. } => break,
+                                    _ => {}
+                                }
+                            }
+                        }));
+                    }
+                }
+                LightningOperationMetaVariant::Pay(_) => {
+                    if let Ok(sub) = ln.subscribe_ln_pay(operation_id).await {
+                        pending.push(Box::pin(async move {
+                            let mut stream = sub.into_stream();
+                            while let Some(state) = stream.next().await {
+                                match state {
+                                    LnPayState::Success { .. }
+                                    | LnPayState::Refunded { .. }
+                                    | LnPayState::UnexpectedError { .. } => break,
+                                    _ => {}
+                                }
+                            }
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !pending.is_empty() {
+            let all = futures::future::join_all(pending);
+            let timeout = sleep(std::time::Duration::from_millis(200));
+            futures::pin_mut!(all);
+            futures::pin_mut!(timeout);
+            let _ = futures::future::select(all, timeout).await;
+
+            // Re-fetch with updated cached outcomes
+            let operations = client
+                .operation_log()
+                .paginate_operations_rev(limit, None)
+                .await;
+            return Ok(serde_json::to_string_pretty(&operations)?);
+        }
+
         Ok(serde_json::to_string_pretty(&operations)?)
     }
 
