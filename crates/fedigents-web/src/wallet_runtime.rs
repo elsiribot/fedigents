@@ -22,6 +22,11 @@ pub enum BootstrapEvent {
     Balance(u64),
 }
 
+#[derive(Clone, Debug)]
+pub enum OperationEvent {
+    PaymentReceived { amount_sats: Option<u64> },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InvoiceResponse {
     pub operation_id: String,
@@ -126,6 +131,14 @@ impl WalletRuntime {
 
     pub async fn list_operations(&self, limit: usize) -> anyhow::Result<String> {
         self.worker.request(Command::ListOperations { limit }).await
+    }
+
+    pub fn set_operation_listener(&self, listener: Option<Rc<dyn Fn(OperationEvent)>>) {
+        self.worker.set_operation_listener(listener);
+    }
+
+    pub async fn watch_pending_receives(&self) -> anyhow::Result<()> {
+        self.worker.request(Command::WatchPendingReceives).await
     }
 }
 
@@ -251,15 +264,22 @@ async fn handle_request(
         Command::CreateInvoice {
             amount_sats,
             description,
-        } => with_runtime(&runtime, |wallet| async move {
-            let response = wallet.create_invoice(amount_sats, &description).await?;
-            Ok(InvoiceResponse {
-                operation_id: response.operation_id,
-                invoice: response.invoice,
+        } => {
+            let scope = scope.clone();
+            with_runtime(&runtime, move |wallet| async move {
+                let (op_id, response) = wallet.create_invoice(amount_sats, &description).await?;
+                wallet.spawn_receive_watcher(op_id, false, Some(amount_sats), move |amt| {
+                    let event = WireOperationEvent::PaymentReceived { amount_sats: amt };
+                    let _ = post_message(&scope, &WorkerEventEnvelope::operation(event));
+                });
+                Ok(InvoiceResponse {
+                    operation_id: response.operation_id,
+                    invoice: response.invoice,
+                })
             })
-        })
-        .await
-        .and_then(serialize_ok),
+            .await
+            .and_then(serialize_ok)
+        }
         Command::Pay {
             payment,
             amount_sats,
@@ -273,6 +293,21 @@ async fn handle_request(
         })
         .await
         .and_then(serialize_ok),
+        Command::WatchPendingReceives => {
+            let scope = scope.clone();
+            with_runtime(&runtime, move |wallet| async move {
+                wallet
+                    .watch_pending_receives(move |amount_sats| {
+                        let event =
+                            WireOperationEvent::PaymentReceived { amount_sats };
+                        let _ =
+                            post_message(&scope, &WorkerEventEnvelope::operation(event));
+                    })
+                    .await
+            })
+            .await
+            .and_then(|_| serialize_ok(()))
+        }
     };
 
     ResponseEnvelope {
@@ -322,6 +357,7 @@ fn post_message<T: Serialize>(
 
 type ResponseSender = oneshot::Sender<anyhow::Result<serde_json::Value>>;
 type BootstrapListener = Rc<dyn Fn(BootstrapEvent)>;
+type OperationListener = Rc<dyn Fn(OperationEvent)>;
 
 #[derive(Clone)]
 struct WorkerClient {
@@ -333,16 +369,19 @@ struct WorkerClientInner {
     next_id: Cell<u64>,
     pending: Rc<RefCell<HashMap<u64, ResponseSender>>>,
     bootstrap_listener: Rc<RefCell<Option<BootstrapListener>>>,
+    operation_listener: Rc<RefCell<Option<OperationListener>>>,
     _on_message: Closure<dyn FnMut(MessageEvent)>,
 }
 
 impl WorkerClient {
     fn new(worker: Worker) -> Self {
         let pending = Rc::new(RefCell::new(HashMap::<u64, ResponseSender>::new()));
-        let listener = Rc::new(RefCell::new(None::<BootstrapListener>));
+        let bootstrap_listener = Rc::new(RefCell::new(None::<BootstrapListener>));
+        let operation_listener = Rc::new(RefCell::new(None::<OperationListener>));
         let on_message = Closure::wrap(Box::new({
             let pending = Rc::clone(&pending);
-            let listener = Rc::clone(&listener);
+            let bootstrap_listener = Rc::clone(&bootstrap_listener);
+            let operation_listener = Rc::clone(&operation_listener);
             move |event: MessageEvent| {
                 let Some(raw) = event.data().as_string() else {
                     return;
@@ -362,7 +401,12 @@ impl WorkerClient {
                 if let Ok(event) = serde_json::from_str::<WorkerEventEnvelope>(&raw) {
                     match event.payload {
                         WorkerEventPayload::Bootstrap { data } => {
-                            if let Some(callback) = listener.borrow().as_ref() {
+                            if let Some(callback) = bootstrap_listener.borrow().as_ref() {
+                                callback(data.into_public());
+                            }
+                        }
+                        WorkerEventPayload::OperationSettled { data } => {
+                            if let Some(callback) = operation_listener.borrow().as_ref() {
                                 callback(data.into_public());
                             }
                         }
@@ -376,7 +420,8 @@ impl WorkerClient {
             worker,
             next_id: Cell::new(1),
             pending,
-            bootstrap_listener: listener,
+            bootstrap_listener,
+            operation_listener,
             _on_message: on_message,
         };
         Self {
@@ -386,6 +431,10 @@ impl WorkerClient {
 
     fn set_bootstrap_listener(&self, listener: Option<Rc<dyn Fn(BootstrapEvent)>>) {
         self.inner.bootstrap_listener.replace(listener);
+    }
+
+    fn set_operation_listener(&self, listener: Option<Rc<dyn Fn(OperationEvent)>>) {
+        self.inner.operation_listener.replace(listener);
     }
 
     async fn request<T: DeserializeOwned>(&self, command: Command) -> anyhow::Result<T> {
@@ -437,6 +486,7 @@ enum Command {
     ListOperations {
         limit: usize,
     },
+    WatchPendingReceives,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -477,12 +527,19 @@ impl WorkerEventEnvelope {
             payload: WorkerEventPayload::Bootstrap { data: event },
         }
     }
+
+    fn operation(event: WireOperationEvent) -> Self {
+        Self {
+            payload: WorkerEventPayload::OperationSettled { data: event },
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 enum WorkerEventPayload {
     Bootstrap { data: WireBootstrapEvent },
+    OperationSettled { data: WireOperationEvent },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -509,6 +566,22 @@ impl WireBootstrapEvent {
             Self::Note { note } => BootstrapEvent::Note(note),
             Self::ReceiveCode { code } => BootstrapEvent::ReceiveCode(code),
             Self::Balance { sats } => BootstrapEvent::Balance(sats),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireOperationEvent {
+    PaymentReceived { amount_sats: Option<u64> },
+}
+
+impl WireOperationEvent {
+    fn into_public(self) -> OperationEvent {
+        match self {
+            Self::PaymentReceived { amount_sats } => {
+                OperationEvent::PaymentReceived { amount_sats }
+            }
         }
     }
 }

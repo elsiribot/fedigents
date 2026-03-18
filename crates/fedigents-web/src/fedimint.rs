@@ -32,6 +32,7 @@ use fedimint_meta_common::DEFAULT_META_KEY;
 use fedimint_mint_client::MintClientInit;
 use fedimint_wallet_client::WalletClientInit;
 use futures::StreamExt;
+use wasm_bindgen_futures::spawn_local;
 use gloo_storage::{LocalStorage, Storage};
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -320,16 +321,19 @@ impl WalletRuntimeCore {
         &self,
         amount_sats: u64,
         description: &str,
-    ) -> anyhow::Result<InvoiceResponse> {
+    ) -> anyhow::Result<(OperationId, InvoiceResponse)> {
         let client = self.ensure_client().await?;
         let (operation_id, invoice) = self
             .create_invoice_internal(&client, amount_sats, description)
             .await?;
 
-        Ok(InvoiceResponse {
-            operation_id: format!("{operation_id:?}"),
-            invoice: invoice.to_string(),
-        })
+        Ok((
+            operation_id,
+            InvoiceResponse {
+                operation_id: format!("{operation_id:?}"),
+                invoice: invoice.to_string(),
+            },
+        ))
     }
 
     pub async fn pay(&self, payment: &str, amount_sats: Option<u64>) -> anyhow::Result<String> {
@@ -430,6 +434,86 @@ impl WalletRuntimeCore {
         }
 
         Ok(serde_json::to_string_pretty(&operations)?)
+    }
+
+    pub fn spawn_receive_watcher(
+        &self,
+        operation_id: OperationId,
+        is_recurring: bool,
+        amount_sats: Option<u64>,
+        on_received: impl FnOnce(Option<u64>) + 'static,
+    ) {
+        let this = self.clone();
+        spawn_local(async move {
+            let Ok(client) = this.ensure_client().await else {
+                return;
+            };
+            let Ok(ln) = client
+                .get_first_module::<LightningClientModule>()
+                .map(|m| m.inner())
+            else {
+                return;
+            };
+            let sub = if is_recurring {
+                ln.subscribe_ln_recurring_receive(operation_id).await
+            } else {
+                ln.subscribe_ln_receive(operation_id).await
+            };
+            let Ok(sub) = sub else { return };
+            let mut stream = sub.into_stream();
+            while let Some(state) = stream.next().await {
+                match state {
+                    LnReceiveState::Claimed => {
+                        on_received(amount_sats);
+                        return;
+                    }
+                    LnReceiveState::Canceled { .. } => return,
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    pub async fn watch_pending_receives(
+        &self,
+        on_received: impl Fn(Option<u64>) + Clone + 'static,
+    ) -> anyhow::Result<()> {
+        let client = self.ensure_client().await?;
+        let operations = client
+            .operation_log()
+            .paginate_operations_rev(10, None)
+            .await;
+
+        for (key, entry) in &operations {
+            if entry.outcome::<serde_json::Value>().is_some() {
+                continue;
+            }
+            if entry.operation_module_kind() != "ln" {
+                continue;
+            }
+            let meta = entry.meta::<LightningOperationMeta>();
+            match &meta.variant {
+                LightningOperationMetaVariant::Receive { invoice, .. } => {
+                    let amount = invoice.amount_milli_satoshis().map(|msats| msats / 1000);
+                    self.spawn_receive_watcher(
+                        key.operation_id,
+                        false,
+                        amount,
+                        on_received.clone(),
+                    );
+                }
+                LightningOperationMetaVariant::RecurringPaymentReceive { .. } => {
+                    self.spawn_receive_watcher(
+                        key.operation_id,
+                        true,
+                        None,
+                        on_received.clone(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     async fn ensure_client(&self) -> anyhow::Result<Rc<ClientHandle>> {

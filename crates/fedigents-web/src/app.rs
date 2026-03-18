@@ -15,7 +15,7 @@ use crate::agent::{
 };
 use crate::browser;
 use crate::ppq::PpqClient;
-use crate::wallet_runtime::{BootstrapEvent, WalletRuntime};
+use crate::wallet_runtime::{BootstrapEvent, OperationEvent, WalletRuntime};
 
 const PPQ_TOPUP_USD: f64 = 0.10;
 
@@ -110,6 +110,34 @@ pub fn App() -> impl IntoView {
                     onboarding_message(format!("Bootstrap failed: {err}")),
                 );
                 return;
+            }
+
+            // Start watching for incoming payments in the background.
+            {
+                let wallet = wallet.clone();
+                wallet.set_operation_listener(Some(Rc::new(move |event| {
+                    match event {
+                        OperationEvent::PaymentReceived { amount_sats } => {
+                            let msg = match amount_sats {
+                                Some(sats) => format!("Incoming payment of {sats} sats received."),
+                                None => "Incoming payment received.".to_owned(),
+                            };
+                            push_message(&messages, onboarding_message(msg));
+                            let wallet = wallet.clone();
+                            spawn_local(async move {
+                                if let Ok(sats) = wallet.get_balance().await {
+                                    balance.set(format_balance(sats));
+                                }
+                            });
+                        }
+                    }
+                })));
+                let wallet = wallet.clone();
+                spawn_local(async move {
+                    if let Err(err) = wallet.watch_pending_receives().await {
+                        tracing::warn!("Failed to start background receive watchers: {err}");
+                    }
+                });
             }
 
             match wallet.is_ppq_ready().await {
