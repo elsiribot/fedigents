@@ -124,7 +124,6 @@ pub fn load_sessions_index() -> Vec<SessionEntry> {
 pub fn save_session(session: &StoredSession) {
     let _ = LocalStorage::set(&session.id, session);
 
-    let mut index = load_sessions_index();
     let preview = session
         .display_messages
         .iter()
@@ -136,9 +135,14 @@ pub fn save_session(session: &StoredSession) {
             } else {
                 s
             }
-        })
-        .unwrap_or_else(|| "New session".to_owned());
+        });
 
+    // Don't index sessions with no user messages
+    let Some(preview) = preview else {
+        return;
+    };
+
+    let mut index = load_sessions_index();
     match index.iter_mut().find(|e| e.id == session.id) {
         Some(entry) => entry.preview = preview,
         None => index.push(SessionEntry {
