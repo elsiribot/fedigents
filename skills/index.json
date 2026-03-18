@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "slug": "generate-images",
+    "title": "Generate images with PPQ",
+    "summary": "Create images through PPQ. Use the saved PPQ account from local storage or create and store one automatically before generating.",
+    "path": "skills/generate-images.md"
+  }
+]

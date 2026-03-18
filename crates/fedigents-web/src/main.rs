@@ -1,5 +1,6 @@
 #[cfg(target_family = "wasm")]
 mod agent;
+mod calc;
 #[cfg(target_family = "wasm")]
 mod app;
 #[cfg(target_family = "wasm")]
