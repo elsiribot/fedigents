@@ -553,6 +553,7 @@ pub fn App() -> impl IntoView {
                                 }
                             };
                             view! {
+                                <div class="menu-backdrop" on:click=move |_| menu_open.set(false)/>
                                 <div class="menu-panel">
                                     <button class="new-session-button" on:click=move |_| {
                                         save_session(&StoredSession {
