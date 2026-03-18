@@ -42,16 +42,19 @@ wasm-bindgen = "0.2.100"
 wasm-bindgen-futures = "0.4.50"
 web-sys = { version = "0.3.77", features = [
   "Clipboard",
+  "Document",
   "FileSystemFileHandle",
   "FileSystemSyncAccessHandle",
   "FileSystemDirectoryHandle",
   "DedicatedWorkerGlobalScope",
   "HtmlInputElement",
   "HtmlTextAreaElement",
+  "Location",
   "MessageEvent",
   "Navigator",
   "ServiceWorkerContainer",
   "StorageManager",
+  "Url",
   "Window",
   "Worker"
 ] }

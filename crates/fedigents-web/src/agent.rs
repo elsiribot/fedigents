@@ -4,8 +4,8 @@ use std::rc::Rc;
 
 use anyhow::Context;
 use gloo_storage::{LocalStorage, Storage};
-use reqwest::Method;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::Method;
 use rig::completion::{Chat, Message, ToolDefinition};
 use rig::prelude::*;
 use rig::providers::openai;
@@ -13,7 +13,7 @@ use rig::tool::{ToolDyn, ToolError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use web_sys::window;
+use web_sys::{window, Url};
 
 use crate::wallet_runtime::WalletRuntime;
 
@@ -25,7 +25,11 @@ const PREAMBLE: &str = "\
 You are the wallet agent inside a chat-only Fedimint wallet. \
 All wallet actions must happen through tools. Keep answers short and practical. \
 For outgoing payments, ALWAYS use propose_payment. Never pay directly. \
-The UI shows a confirm button and only that button can actually send funds.";
+The UI shows a confirm button and only that button can actually send funds. \
+You have a built-in skill catalog injected into this system prompt. \
+Check the available skills before answering. \
+If a skill looks relevant, call load_skill with its slug before proceeding. \
+Use the skills tool to inspect, save, or delete custom skills when needed.";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SkillSummary {
@@ -286,6 +290,21 @@ where
     ToolError::ToolCallError(Box::new(ToolCallMessage(error.into().to_string())))
 }
 
+fn render_skills_prompt(skills: &[SkillSummary]) -> String {
+    if skills.is_empty() {
+        return "No skills are currently available.".into();
+    }
+
+    let mut out = String::from("Available skills:\n");
+    for skill in skills {
+        out.push_str(&format!(
+            "- slug: {}\n  title: {}\n  summary: {}\n",
+            skill.slug, skill.title, skill.summary
+        ));
+    }
+    out
+}
+
 // ── WalletTool enum ─────────────────────────────────────────────────────
 
 enum WalletTool {
@@ -535,14 +554,7 @@ impl ToolDyn for WalletTool {
                         custom_skill.prompt
                     } else if let Some(skill) = skill {
                         if let Some(path) = &skill.path {
-                            reqwest::get(&asset_url(path).map_err(tool_call_error)?)
-                                .await
-                                .map_err(tool_call_error)?
-                                .error_for_status()
-                                .map_err(tool_call_error)?
-                                .text()
-                                .await
-                                .map_err(tool_call_error)?
+                            load_text_asset(path).await.map_err(tool_call_error)?
                         } else {
                             serde_json::to_string(skill).map_err(ToolError::JsonError)?
                         }
@@ -912,8 +924,8 @@ impl WalletAgent {
         let log = ToolLog::new();
 
         let skills = load_skills().await.unwrap_or_else(|_| self.skills.clone());
-        let skills_ctx = serde_json::to_string(&skills).unwrap_or_else(|_| "[]".into());
-        let preamble = format!("{PREAMBLE}\n\nSkills available: {skills_ctx}");
+        let skills_ctx = render_skills_prompt(&skills);
+        let preamble = format!("{PREAMBLE}\n\n{skills_ctx}");
 
         let client: openai::CompletionsClient = openai::CompletionsClient::builder()
             .api_key(&self.ppq_api_key)
@@ -1006,10 +1018,24 @@ pub async fn load_skills() -> anyhow::Result<Vec<SkillSummary>> {
 }
 
 async fn load_default_skills() -> anyhow::Result<Vec<SkillSummary>> {
-    let response = reqwest::get(&asset_url("skills/index.json")?)
+    let catalog_url = asset_url("skills/index.json")?;
+    let response = reqwest::get(&catalog_url)
         .await?
-        .error_for_status()?;
+        .error_for_status()
+        .with_context(|| format!("skills catalog not found at {catalog_url}"))?;
     Ok(response.json().await?)
+}
+
+async fn load_text_asset(path: &str) -> anyhow::Result<String> {
+    let url = asset_url(path)?;
+    reqwest::get(&url)
+        .await
+        .with_context(|| format!("failed to fetch asset from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("asset not found at {url}"))?
+        .text()
+        .await
+        .with_context(|| format!("failed to read asset body from {url}"))
 }
 
 fn asset_url(path: &str) -> anyhow::Result<String> {
@@ -1017,30 +1043,20 @@ fn asset_url(path: &str) -> anyhow::Result<String> {
         return Ok(path.to_owned());
     }
 
+    let clean = path.trim();
+    anyhow::ensure!(!clean.is_empty(), "asset path is empty");
+
     let window = window().ok_or_else(|| anyhow::anyhow!("window is unavailable"))?;
-    let origin = window
-        .location()
-        .origin()
-        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))?;
-    let pathname = window
-        .location()
-        .pathname()
-        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))?;
-    let mut base_path = if pathname.ends_with('/') {
-        pathname
-    } else {
-        match pathname.rfind('/') {
-            Some(idx) => pathname[..=idx].to_owned(),
-            None => "/".to_owned(),
-        }
-    };
+    let base_url = window
+        .document()
+        .and_then(|document| document.base_uri().ok().flatten())
+        .filter(|base| !base.is_empty())
+        .or_else(|| window.location().href().ok())
+        .ok_or_else(|| anyhow::anyhow!("document base URL is unavailable"))?;
 
-    if !base_path.starts_with('/') {
-        base_path.insert(0, '/');
-    }
-
-    let clean = path.trim_start_matches('/');
-    Ok(format!("{origin}{base_path}{clean}"))
+    Url::new_with_base(clean.trim_start_matches('/'), &base_url)
+        .map(|url| url.href())
+        .map_err(|err| anyhow::anyhow!(format!("{err:?}")))
 }
 
 pub fn onboarding_message(body: impl Into<String>) -> ChatMessage {
