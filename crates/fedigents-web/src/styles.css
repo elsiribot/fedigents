@@ -291,6 +291,15 @@ input {
   color: var(--color-dark-grey);
 }
 
+.message-body img,
+.message-body svg {
+  display: block;
+  max-width: calc(100% + 2 * var(--spacing-md));
+  margin-left: calc(-1 * var(--spacing-md));
+  margin-right: calc(-1 * var(--spacing-md));
+  border-radius: 8px;
+}
+
 .message.user .message-body {
   background: rgba(2, 119, 242, 0.1);
   border-bottom-right-radius: 4px;
