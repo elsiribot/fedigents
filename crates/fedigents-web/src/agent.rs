@@ -248,7 +248,7 @@ struct ConvertSatsArgs {
     currency: String,
 }
 
-/// Make an HTTP request. Defaults to GET with no headers or body.
+/// Make an HTTP request. For authenticated APIs (like PPQ), you MUST include an Authorization header. Always set headers explicitly — they are NOT added automatically.
 #[derive(Deserialize, JsonSchema)]
 struct HttpRequestArgs {
     /// Absolute URL to request
@@ -256,10 +256,10 @@ struct HttpRequestArgs {
     /// HTTP method such as GET, POST, PUT, PATCH, or DELETE. Defaults to GET.
     #[serde(default = "default_http_method")]
     method: String,
-    /// Optional request headers
+    /// Request headers as key-value pairs. IMPORTANT: Include Authorization and Content-Type headers when calling authenticated APIs. Example: {"Authorization": "Bearer sk-...", "Content-Type": "application/json"}
     #[serde(default)]
     headers: BTreeMap<String, String>,
-    /// Optional request body. Strings are sent as-is; objects and arrays are sent as JSON.
+    /// Request body. Strings are sent as-is; objects and arrays are sent as JSON.
     #[serde(default)]
     body: Option<serde_json::Value>,
 }
