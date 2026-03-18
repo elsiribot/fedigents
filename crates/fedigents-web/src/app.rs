@@ -526,18 +526,23 @@ pub fn App() -> impl IntoView {
                         </button>
                     </div>
                 </footer>
-            </div>
 
-            <div style:display=move || if scanner_open.get() { "grid" } else { "none" } class="modal-shell">
-                <Scan
-                    active=scanner_open
-                    on_scan=move |data: String| {
-                        scanner_open.set(false);
-                        scan_submit(data);
-                    }
-                    class=""
-                    video_class="scanner-video"
-                />
+                <div style:display=move || if scanner_open.get() { "flex" } else { "none" } class="scanner-overlay">
+                    <div class="scanner-card">
+                        <Scan
+                            active=scanner_open
+                            on_scan=move |data: String| {
+                                scanner_open.set(false);
+                                scan_submit(data);
+                            }
+                            class=""
+                            video_class="scanner-video"
+                        />
+                        <button class="secondary-button" on:click=move |_| scanner_open.set(false)>
+                            "Close scanner"
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     }
