@@ -14,7 +14,8 @@ use web_sys::HtmlTextAreaElement;
 
 use crate::agent::{
     assistant_message, load_session, load_sessions_index, load_skills, onboarding_message,
-    save_session, user_message, ChatMessage, ChatRole, ConversationLog, PendingPaymentProposal,
+    save_session, user_message, ChatMessage, ChatRole, ConversationLog, PaymentKind,
+    PendingPaymentProposal,
     SkillSummary, StoredSession, WalletAgent,
 };
 use crate::browser;
@@ -49,6 +50,7 @@ pub fn App() -> impl IntoView {
     let busy = RwSignal::new(true);
     let confirming_payment = RwSignal::new(false);
     let pending_payment = RwSignal::new(None::<PendingPaymentProposal>);
+    let payment_result = RwSignal::new(None::<Result<String, String>>);
     let scanner_open = RwSignal::new(false);
     let debug_mode = RwSignal::new(false);
     let menu_open = RwSignal::new(false);
@@ -387,12 +389,17 @@ pub fn App() -> impl IntoView {
             };
 
             confirming_payment.set(true);
-            busy.set(true);
-            pending_payment.set(None);
+            payment_result.set(None);
             spawn_local(async move {
-                match runtime_value
-                    .pay(&proposal.payment, proposal.amount_sats)
-                    .await
+                let pay_result = match &proposal.kind {
+                    PaymentKind::Bolt11 { invoice, .. } => {
+                        runtime_value.pay(invoice, None).await
+                    }
+                    PaymentKind::LnAddress { address, amount_sats } => {
+                        runtime_value.pay(address, Some(*amount_sats)).await
+                    }
+                };
+                match pay_result
                 {
                     Ok(result) => {
                         push_message(
@@ -402,33 +409,25 @@ pub fn App() -> impl IntoView {
                                 body: format!("pay_lightning => {result}"),
                             },
                         );
-                        push_message(&messages, assistant_message("Payment sent."));
+                        payment_result.set(Some(Ok("Payment sent successfully.".to_owned())));
                         if let Ok(amount_sats) = runtime_value.get_balance().await {
                             balance.set(format_balance(amount_sats));
                         }
                     }
                     Err(err) => {
-                        pending_payment.set(Some(proposal));
-                        push_message(
-                            &messages,
-                            onboarding_message(format!("Payment failed: {err}")),
-                        );
+                        payment_result.set(Some(Err(format!("Payment failed: {err}"))));
                     }
                 }
                 confirming_payment.set(false);
-                busy.set(false);
             });
         }
     };
 
     let dismiss_payment = {
         move |_ev: MouseEvent| {
-            if let Some(proposal) = pending_payment.get_untracked() {
+            if pending_payment.get_untracked().is_some() || payment_result.get_untracked().is_some() {
                 pending_payment.set(None);
-                push_message(
-                    &messages,
-                    onboarding_message(format!("Dismissed pending payment: {}", proposal.summary)),
-                );
+                payment_result.set(None);
             }
         }
     };
@@ -678,31 +677,55 @@ pub fn App() -> impl IntoView {
                         </div>
                         <article
                             class="pending-payment-card"
-                            style:display=move || if pending_payment.get().is_some() { "grid" } else { "none" }
+                            style:display=move || if pending_payment.get().is_some() || confirming_payment.get() || payment_result.get().is_some() { "grid" } else { "none" }
                         >
-                            <div class="message-meta">
-                                <span class="message-role">"pending payment"</span>
+                            <div class="payment-result-area"
+                                style:display=move || if payment_result.get().is_some() { "flex" } else { "none" }
+                                class:payment-success=move || matches!(payment_result.get(), Some(Ok(_)))
+                                class:payment-error=move || matches!(payment_result.get(), Some(Err(_)))
+                            >
+                                <span>{move || payment_result.get().map(|r| match r { Ok(m) | Err(m) => m }).unwrap_or_default()}</span>
+                                <button class="secondary-button" type="button" on:click=dismiss_payment>"Dismiss"</button>
                             </div>
-                            <div class="pending-payment-summary">
-                                {move || pending_payment.get().map(|proposal| proposal.summary).unwrap_or_default()}
+                            <div class="payment-form-area"
+                                style:display=move || if payment_result.get().is_none() { "grid" } else { "none" }
+                            >
+                                <div class="message-meta">
+                                    <span class="message-role">"pending payment"</span>
+                                </div>
+                                <div class="pending-payment-summary">
+                                    {move || pending_payment.get().map(|proposal| proposal.summary).unwrap_or_default()}
+                                </div>
+                                <dl class="pending-payment-details">
+                                    <div>
+                                        <dt>"Amount"</dt>
+                                        <dd>
+                                            {move || pending_payment.get().map(|proposal| match &proposal.kind {
+                                                PaymentKind::Bolt11 { amount_sats: Some(amount), .. } => format!("{amount} sats"),
+                                                PaymentKind::LnAddress { amount_sats, .. } => format!("{amount_sats} sats"),
+                                                _ => "Amount encoded in invoice".to_owned(),
+                                            }).unwrap_or_default()}
+                                        </dd>
+                                    </div>
+                                    <div>
+                                        <dt>"Request"</dt>
+                                        <dd class="payment-request">
+                                            {move || pending_payment.get().map(|proposal| match &proposal.kind {
+                                                PaymentKind::Bolt11 { invoice, .. } => truncate_middle(invoice, 96),
+                                                PaymentKind::LnAddress { address, .. } => address.clone(),
+                                            }).unwrap_or_default()}
+                                        </dd>
+                                    </div>
+                                </dl>
+                                <div class="payment-actions">
+                                    <button class="action-button" type="button" on:click=confirm_payment disabled=move || confirming_payment.get()>
+                                        {move || if confirming_payment.get() { "Sending..." } else { "Confirm payment" }}
+                                    </button>
+                                    <button class="secondary-button" type="button" on:click=dismiss_payment disabled=move || confirming_payment.get()>
+                                        "Cancel"
+                                    </button>
+                                </div>
                             </div>
-                            <dl class="pending-payment-details">
-                                <div>
-                                    <dt>"Amount"</dt>
-                                    <dd>
-                                        {move || pending_payment.get().and_then(|proposal| proposal.amount_sats).map(|amount| format!("{amount} sats")).unwrap_or_else(|| "Amount comes from the request".to_owned())}
-                                    </dd>
-                                </div>
-                                <div>
-                                    <dt>"Request"</dt>
-                                    <dd class="payment-request">
-                                        {move || pending_payment.get().map(|proposal| truncate_middle(&proposal.payment, 96)).unwrap_or_default()}
-                                    </dd>
-                                </div>
-                            </dl>
-                            <button class="action-button" type="button" on:click=confirm_payment disabled=move || busy.get() || confirming_payment.get()>
-                                {move || if busy.get() || confirming_payment.get() { "Sending..." } else { "Confirm payment" }}
-                            </button>
                         </article>
                     </div>
                 </section>
@@ -728,19 +751,6 @@ pub fn App() -> impl IntoView {
                         ></textarea>
                         <button type="submit" disabled=move || !ready.get() || busy.get()></button>
                     </form>
-                    <div
-                        class="supporting"
-                        style:display=move || if pending_payment.get().is_some() { "flex" } else { "none" }
-                    >
-                        <button
-                            class="secondary-button"
-                            type="button"
-                            on:click=dismiss_payment
-                            disabled=move || busy.get()
-                        >
-                            "Dismiss pending payment"
-                        </button>
-                    </div>
                 </footer>
 
                 <div style:display=move || if scanner_open.get() { "flex" } else { "none" } class="scanner-overlay" on:click=move |_| scanner_open.set(false)>

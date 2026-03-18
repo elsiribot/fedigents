@@ -27,8 +27,11 @@ const SESSIONS_INDEX_KEY: &str = "fedigents.sessions";
 const PREAMBLE: &str = "\
 You are the wallet agent inside a chat-only Fedimint wallet. \
 All wallet actions must happen through tools. Keep answers short and practical. \
-For outgoing payments, ALWAYS use propose_payment. Never pay directly. \
+For outgoing payments, ALWAYS use pay_invoice or pay_address. Never pay directly. \
 The UI shows a confirm button and only that button can actually send funds. \
+If you see anything that looks like a BOLT11 invoice (starts with \"lnbc\"), immediately propose a payment using pay_invoice. \
+For LNURL or Lightning addresses (user@domain), ask the user for the amount in sats before calling pay_address. \
+Make reasonable assumptions instead of asking the user about every detail — only ask when information is truly missing or ambiguous. \
 You have a built-in skill catalog injected into this system prompt. \
 Check the available skills before answering. \
 If a skill looks relevant, call load_skill with its slug before proceeding. \
@@ -78,9 +81,20 @@ pub struct ChatMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingPaymentProposal {
-    pub payment: String,
-    pub amount_sats: Option<u64>,
+    pub kind: PaymentKind,
     pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PaymentKind {
+    Bolt11 {
+        invoice: String,
+        amount_sats: Option<u64>,
+    },
+    LnAddress {
+        address: String,
+        amount_sats: u64,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -197,13 +211,23 @@ fn default_description() -> String {
     "Fedigents request".into()
 }
 
-/// Propose an outgoing Lightning payment for user confirmation. The UI shows a confirm button; only that button sends funds.
+/// Pay a BOLT11 Lightning invoice. BOLT11 invoices start with "lnbc" and already encode the amount — do NOT use this for LNURL or Lightning addresses. The UI shows a confirm button; only that button sends funds.
 #[derive(Deserialize, JsonSchema)]
-struct ProposePaymentArgs {
-    /// BOLT11 invoice or LNURL
-    payment: String,
-    /// Amount in sats (required for amountless invoices/LNURL)
-    amount_sats: Option<u64>,
+struct PayInvoiceArgs {
+    /// The BOLT11 invoice string (starts with "lnbc")
+    invoice: String,
+    /// Short human-readable description
+    #[serde(default = "default_payment_summary")]
+    summary: String,
+}
+
+/// Pay to an LNURL or Lightning address. Use this for LNURL (starts with "lnurl") and Lightning addresses (look like user@domain). Do NOT use for BOLT11 invoices (those start with "lnbc" — use pay_invoice instead). The UI shows a confirm button; only that button sends funds.
+#[derive(Deserialize, JsonSchema)]
+struct PayAddressArgs {
+    /// The LNURL string or Lightning address (user@domain)
+    address: String,
+    /// Amount in sats to send
+    amount_sats: u64,
     /// Short human-readable description
     #[serde(default = "default_payment_summary")]
     summary: String,
@@ -450,7 +474,10 @@ enum WalletTool {
         wallet: WalletRuntime,
         log: Rc<ToolLog>,
     },
-    ProposePayment {
+    PayInvoice {
+        log: Rc<ToolLog>,
+    },
+    PayAddress {
         log: Rc<ToolLog>,
     },
     ListOperations {
@@ -487,7 +514,8 @@ impl ToolDyn for WalletTool {
         match self {
             Self::GetBalance { .. } => "get_balance",
             Self::CreateInvoice { .. } => "create_invoice",
-            Self::ProposePayment { .. } => "propose_payment",
+            Self::PayInvoice { .. } => "pay_invoice",
+            Self::PayAddress { .. } => "pay_address",
             Self::ListOperations { .. } => "list_operations",
             Self::ShowReceiveCode { .. } => "show_receive_code",
             Self::LoadSkill { .. } => "load_skill",
@@ -507,7 +535,8 @@ impl ToolDyn for WalletTool {
         let def = match self {
             Self::GetBalance { .. } => tool_definition::<GetBalanceArgs>("get_balance"),
             Self::CreateInvoice { .. } => tool_definition::<CreateInvoiceArgs>("create_invoice"),
-            Self::ProposePayment { .. } => tool_definition::<ProposePaymentArgs>("propose_payment"),
+            Self::PayInvoice { .. } => tool_definition::<PayInvoiceArgs>("pay_invoice"),
+            Self::PayAddress { .. } => tool_definition::<PayAddressArgs>("pay_address"),
             Self::ListOperations { .. } => tool_definition::<ListOperationsArgs>("list_operations"),
             Self::ShowReceiveCode { .. } => {
                 tool_definition::<ShowReceiveCodeArgs>("show_receive_code")
@@ -550,23 +579,52 @@ impl ToolDyn for WalletTool {
                     log.push(ChatRole::Tool, format!("create_invoice => {result}"));
                     Ok(result)
                 }
-                Self::ProposePayment { log } => {
-                    let args: ProposePaymentArgs =
+                Self::PayInvoice { log } => {
+                    let args: PayInvoiceArgs =
                         serde_json::from_str(&args).map_err(ToolError::JsonError)?;
                     log.push(
                         ChatRole::Tool,
-                        format!("[tool call] propose_payment({})", args.summary),
+                        format!("[tool call] pay_invoice({})", args.summary),
                     );
+                    let bolt11 = args.invoice.strip_prefix("lightning:").unwrap_or(&args.invoice).to_owned();
+                    let parsed = bolt11
+                        .parse::<lightning_invoice::Bolt11Invoice>()
+                        .map_err(|e| tool_call_error(anyhow::anyhow!("Invalid BOLT11 invoice: {e}. If you have an LNURL or Lightning address, use pay_address instead.")))?;
+                    let amount_sats = parsed.amount_milli_satoshis().map(|msat| msat / 1000);
                     let proposal = PendingPaymentProposal {
-                        payment: args.payment,
-                        amount_sats: args.amount_sats,
+                        kind: PaymentKind::Bolt11 { invoice: bolt11, amount_sats },
                         summary: args.summary,
                     };
                     let result = json!({
                         "status": "pending_confirmation",
                         "summary": proposal.summary,
-                        "amount_sats": proposal.amount_sats,
-                        "payment": proposal.payment,
+                        "amount_sats": amount_sats,
+                    })
+                    .to_string();
+                    log.pending_payment.replace(Some(proposal));
+                    log.push(ChatRole::Tool, format!("pay_invoice => {result}"));
+                    Ok(result)
+                }
+                Self::PayAddress { log } => {
+                    let args: PayAddressArgs =
+                        serde_json::from_str(&args).map_err(ToolError::JsonError)?;
+                    log.push(
+                        ChatRole::Tool,
+                        format!("[tool call] pay_address({})", args.summary),
+                    );
+                    let address = args.address.strip_prefix("lightning:").unwrap_or(&args.address).to_owned();
+                    if address.starts_with("lnbc") || address.starts_with("lntb") || address.starts_with("lnbcrt") {
+                        return Err(tool_call_error(anyhow::anyhow!("This looks like a BOLT11 invoice, not an LNURL/Lightning address. Use pay_invoice instead.")));
+                    }
+                    let amount_sats = args.amount_sats;
+                    let proposal = PendingPaymentProposal {
+                        kind: PaymentKind::LnAddress { address, amount_sats },
+                        summary: args.summary,
+                    };
+                    let result = json!({
+                        "status": "pending_confirmation",
+                        "summary": proposal.summary,
+                        "amount_sats": amount_sats,
                     })
                     .to_string();
                     log.pending_payment.replace(Some(proposal));
@@ -1087,7 +1145,10 @@ impl WalletAgent {
                 wallet: self.wallet.clone(),
                 log: Rc::clone(&log),
             }),
-            Box::new(WalletTool::ProposePayment {
+            Box::new(WalletTool::PayInvoice {
+                log: Rc::clone(&log),
+            }),
+            Box::new(WalletTool::PayAddress {
                 log: Rc::clone(&log),
             }),
             Box::new(WalletTool::ListOperations {
@@ -1124,6 +1185,7 @@ impl WalletAgent {
             .preamble(&preamble)
             .default_max_turns(10)
             .temperature(0.2)
+            .max_tokens(5000)
             .tools(tools)
             .build();
 
