@@ -18,7 +18,7 @@ use web_sys::{window, Url};
 use crate::wallet_runtime::WalletRuntime;
 
 const PPQ_API_BASE: &str = "https://api.ppq.ai";
-const MODEL: &str = "claude-haiku-4.5";
+const MODEL: &str = "openai/gpt-5.4-nano";
 const CUSTOM_SKILLS_KEY: &str = "fedigents.skills.custom";
 
 const PREAMBLE: &str = "\
@@ -265,10 +265,72 @@ fn tool_definition<A: JsonSchema>(name: &str) -> ToolDefinition {
         obj.remove("description");
     }
 
+    // Ensure the root object has a "properties" key (Azure requires it)
+    if let Some(obj) = schema.as_object_mut() {
+        if obj.get("type").and_then(|v| v.as_str()) == Some("object")
+            && !obj.contains_key("properties")
+        {
+            obj.insert("properties".into(), json!({}));
+        }
+    }
+
+    // Fix schema patterns that Azure OpenAI doesn't support
+    fixup_azure_schema(&mut schema);
+
     ToolDefinition {
         name: name.into(),
         description,
         parameters: schema,
+    }
+}
+
+/// Recursively fix JSON Schema patterns incompatible with Azure OpenAI:
+/// - Replace `"type": ["T", "null"]` with `"type": "T"`
+/// - Add `"type": "object"` to objects missing a type field but having description
+fn fixup_azure_schema(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            // Replace type-as-array with the non-null type
+            if let Some(ty) = obj.get("type") {
+                if let Some(arr) = ty.as_array() {
+                    let non_null: Vec<_> = arr
+                        .iter()
+                        .filter(|v| v.as_str() != Some("null"))
+                        .collect();
+                    if non_null.len() == 1 {
+                        obj.insert("type".into(), non_null[0].clone());
+                    }
+                }
+            }
+
+            // If a property definition has no "type" at all, default to
+            // "string" (covers cases like Option<serde_json::Value>).
+            // Only apply when "description" is a string (a schema keyword),
+            // not when it's an object (a sibling property definition named
+            // "description" inside a properties container).
+            let has_schema_description = obj
+                .get("description")
+                .is_some_and(|v| v.is_string());
+            if !obj.contains_key("type")
+                && !obj.contains_key("oneOf")
+                && !obj.contains_key("anyOf")
+                && !obj.contains_key("allOf")
+                && !obj.contains_key("$ref")
+                && has_schema_description
+            {
+                obj.insert("type".into(), json!("string"));
+            }
+
+            for (_, v) in obj.iter_mut() {
+                fixup_azure_schema(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                fixup_azure_schema(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -925,7 +987,22 @@ impl WalletAgent {
 
         let skills = load_skills().await.unwrap_or_else(|_| self.skills.clone());
         let skills_ctx = render_skills_prompt(&skills);
-        let preamble = format!("{PREAMBLE}\n\n{skills_ctx}");
+
+        // Extract previously loaded skill prompts from history so the model
+        // retains skill instructions across turns without re-loading.
+        let loaded_skills: String = history
+            .iter()
+            .filter_map(|m| match m.role {
+                ChatRole::Tool => m.body.strip_prefix("load_skill => "),
+                _ => None,
+            })
+            .fold(String::new(), |mut acc, prompt| {
+                acc.push_str("\n\n--- Loaded skill ---\n");
+                acc.push_str(prompt);
+                acc
+            });
+
+        let preamble = format!("{PREAMBLE}\n\n{skills_ctx}{loaded_skills}");
 
         let client: openai::CompletionsClient = openai::CompletionsClient::builder()
             .api_key(&self.ppq_api_key)
@@ -982,11 +1059,20 @@ impl WalletAgent {
             .tools(tools)
             .build();
 
-        let chat_history = history
+        // The caller already passes the latest user message as `prompt`, so
+        // strip it from the tail of history to avoid duplicate user messages
+        // (which some providers like Azure/OpenAI reject).
+        let history_without_current = match history.last() {
+            Some(m) if matches!(m.role, ChatRole::User) => &history[..history.len() - 1],
+            _ => history,
+        };
+
+        let chat_history = history_without_current
             .iter()
             .filter_map(|m| match m.role {
                 ChatRole::User => Some(Message::user(m.body.clone())),
                 ChatRole::Assistant => Some(Message::assistant(m.body.clone())),
+                ChatRole::Tool => Some(Message::user(format!("[tool output] {}", m.body))),
                 _ => None,
             })
             .collect::<Vec<_>>();
