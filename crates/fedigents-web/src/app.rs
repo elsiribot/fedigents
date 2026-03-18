@@ -631,7 +631,9 @@ pub fn App() -> impl IntoView {
                                     <div class="receive-card">
                                         <div class="message-role">"First deposit"</div>
                                         <div>
-                                            "Use this LNURL to fund the wallet. After the first receive settles, Fedigents will top up PPQ with $0.10 and unlock the chat interface."
+                                            "Use this payment code to fund the wallet. After the first receive settles, Fedigents will top up "
+                                            <a href="https://ppq.ai" target="_blank" rel="noopener noreferrer">"PPQ.ai"</a>
+                                            " with $0.10 and unlock the chat interface."
                                         </div>
                                         {qr_svg.map(|svg| view! {
                                             <div class="qr-inline">
@@ -646,7 +648,7 @@ pub fn App() -> impl IntoView {
                                                     let _ = browser::copy_to_clipboard(&lnurl).await;
                                                 });
                                             }>
-                                                "Copy LNURL"
+                                                "Copy"
                                             </button>
                                         </div>
                                     </div>

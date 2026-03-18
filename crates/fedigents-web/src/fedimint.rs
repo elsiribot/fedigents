@@ -204,9 +204,6 @@ impl WalletRuntimeCore {
             }
             Err(err) => {
                 info!("LNURL receive setup failed: {err:#}");
-                on_event(BootstrapEvent::Note(format!(
-                    "LNURL receive setup is unavailable in this federation right now ({err}). Falling back to a starter invoice."
-                )));
                 None
             }
         };
@@ -223,10 +220,7 @@ impl WalletRuntimeCore {
                 let (operation_id, invoice) = self
                     .create_invoice_internal(&client, 1_000, "Initial Fedigents funding")
                     .await?;
-                on_event(BootstrapEvent::Note(
-                    "Paste this starter BOLT11 invoice into your wallet and pay it to continue setup:".to_owned(),
-                ));
-                on_event(BootstrapEvent::Note(invoice.to_string()));
+                on_event(BootstrapEvent::ReceiveCode(invoice.to_string()));
                 self.wait_for_first_invoice_deposit(&client, operation_id, &mut on_event)
                     .await?;
             }
