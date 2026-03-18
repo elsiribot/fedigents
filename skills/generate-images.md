@@ -63,7 +63,7 @@ http_request
   url: https://api.ppq.ai/v1/images/generations
   method: POST
   headers: {"Authorization": "Bearer <api_key>", "Content-Type": "application/json"}
-  body: {"model": "<model>", "prompt": "<user prompt>", "n": 1}
+  body: {"model": "<model>", "prompt": "<user prompt>", "quality": "low", "n": 1}
 ```
 
 ### Available models
@@ -90,7 +90,7 @@ http_request
 
 ### Defaults
 
-- Default model: `gpt-image-1` with quality `"medium"`
+- Default model: `gpt-image-1` with quality `"low"` (smaller download size)
 - Unless the user asks for a specific model, use `gpt-image-1`
 - For image-to-image requests, use `flux-2-pro-i2i` with the `image_url` parameter
 
