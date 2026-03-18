@@ -641,6 +641,14 @@ pub fn App() -> impl IntoView {
                                 {chat_nodes}
                             }
                         }}
+                        <div
+                            class="typing-indicator"
+                            style:display=move || if busy.get() && ready.get() { "flex" } else { "none" }
+                        >
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                        </div>
                         <article
                             class="pending-payment-card"
                             style:display=move || if pending_payment.get().is_some() { "grid" } else { "none" }
