@@ -224,6 +224,19 @@ input {
   background: var(--color-extra-light-grey);
 }
 
+.ppq-balance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-xs) 0;
+}
+
+.ppq-balance-value {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .balance-card {
   display: flex;
   flex-direction: column;

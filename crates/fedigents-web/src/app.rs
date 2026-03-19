@@ -60,6 +60,7 @@ pub fn App() -> impl IntoView {
     let menu_open = RwSignal::new(false);
     let ppq_account = RwSignal::new(None::<PpqAccount>);
     let ppq_low_balance_usd = RwSignal::new(None::<f64>);
+    let ppq_balance_usd = RwSignal::new(None::<f64>);
     let ppq_topup_in_progress = RwSignal::new(false);
     let ppq_topup_grace_until = Rc::new(RefCell::new(None::<f64>));
     let selected_model = RwSignal::new(
@@ -212,6 +213,7 @@ pub fn App() -> impl IntoView {
                                     PpqClient::new(),
                                     account,
                                     ppq_low_balance_usd,
+                                    ppq_balance_usd,
                                     ppq_topup_in_progress,
                                     Rc::clone(&ppq_topup_grace_until),
                                     low_balance_threshold,
@@ -262,6 +264,7 @@ pub fn App() -> impl IntoView {
                                 PpqClient::new(),
                                 account,
                                 ppq_low_balance_usd,
+                                ppq_balance_usd,
                                 ppq_topup_in_progress,
                                 Rc::clone(&ppq_topup_grace_until),
                                 low_balance_threshold,
@@ -283,6 +286,7 @@ pub fn App() -> impl IntoView {
                                     PpqClient::new(),
                                     account,
                                     ppq_low_balance_usd,
+                                    ppq_balance_usd,
                                     ppq_topup_in_progress,
                                     Rc::clone(&ppq_topup_grace_until),
                                     low_balance_threshold,
@@ -645,6 +649,14 @@ pub fn App() -> impl IntoView {
                                         />
                                         "Debug"
                                     </label>
+                                    <div class="menu-divider"/>
+                                    <div class="ppq-balance-row">
+                                        <span class="menu-section-label">"PPQ Balance"</span>
+                                        <span class="ppq-balance-value">{move || match ppq_balance_usd.get() {
+                                            Some(usd) => format!("${:.4}", usd),
+                                            None => "—".to_owned(),
+                                        }}</span>
+                                    </div>
                                     <div class="menu-divider"/>
                                     <div class="menu-section-label">"Model"</div>
                                     <select class="model-select"
@@ -1017,6 +1029,7 @@ fn start_ppq_balance_watch(
     ppq: PpqClient,
     account: PpqAccount,
     ppq_low_balance_usd: RwSignal<Option<f64>>,
+    ppq_balance_usd: RwSignal<Option<f64>>,
     ppq_topup_in_progress: RwSignal<bool>,
     ppq_topup_grace_until: Rc<RefCell<Option<f64>>>,
     low_balance_threshold: RwSignal<f64>,
@@ -1025,6 +1038,7 @@ fn start_ppq_balance_watch(
         loop {
             match ppq.balance(&account).await {
                 Ok(balance) => {
+                    ppq_balance_usd.set(Some(balance.amount_usd));
                     let threshold = low_balance_threshold.get_untracked();
                     let in_grace = ppq_topup_grace_until
                         .borrow()
