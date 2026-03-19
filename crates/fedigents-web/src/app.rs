@@ -474,6 +474,10 @@ pub fn App() -> impl IntoView {
                             },
                         );
                         payment_result.set(Some(Ok("Payment sent successfully.".to_owned())));
+                        payment_received_trigger.set(Some(format!(
+                            "Outgoing payment succeeded: {}",
+                            proposal.summary
+                        )));
                         if let Ok(amount_sats) = runtime_value.get_balance().await {
                             balance.set(format_balance(amount_sats));
                         }
