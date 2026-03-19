@@ -19,7 +19,6 @@ use web_sys::{window, Url};
 use crate::wallet_runtime::WalletRuntime;
 
 const PPQ_API_BASE: &str = "https://api.ppq.ai";
-const MODEL: &str = "openai/gpt-5.4-nano";
 const CUSTOM_SKILLS_KEY: &str = "fedigents.skills.custom";
 const KV_PREFIX: &str = "fedigents.kv.";
 const SESSIONS_INDEX_KEY: &str = "fedigents.sessions";
@@ -32,6 +31,8 @@ The UI shows a confirm button and only that button can actually send funds. \
 If you see anything that looks like a BOLT11 invoice (starts with \"lnbc\"), immediately propose a payment using pay_invoice. \
 For LNURL or Lightning addresses (user@domain), ask the user for the amount in sats before calling pay_address. \
 Make reasonable assumptions instead of asking the user about every detail — only ask when information is truly missing or ambiguous. \
+When displaying a Lightning invoice or payment request in your response, wrap it in <invoice>...</invoice> tags. \
+The UI will render it as an abbreviated code with copy and QR buttons. Never put invoices in code blocks — always use the <invoice> tag. \
 You have a built-in skill catalog injected into this system prompt. \
 Check the available skills before answering. \
 If a skill looks relevant, call load_skill with its slug before proceeding. \
@@ -1123,6 +1124,8 @@ impl WalletAgent {
         &self,
         conversation: &ConversationLog,
         prompt: &str,
+        model: &str,
+        thinking_effort: Option<&str>,
     ) -> anyhow::Result<AgentResponse> {
         let log = ToolLog::new();
 
@@ -1180,14 +1183,29 @@ impl WalletAgent {
             }),
         ];
 
-        let agent = client
-            .agent(MODEL)
+        let is_reasoning = model.contains("/o3")
+            || model.contains("/o4")
+            || model.starts_with("o3")
+            || model.starts_with("o4");
+
+        let mut builder = client
+            .agent(model)
             .preamble(&preamble)
             .default_max_turns(10)
-            .temperature(0.2)
             .max_tokens(5000)
-            .tools(tools)
-            .build();
+            .tools(tools);
+
+        if !is_reasoning {
+            builder = builder.temperature(0.2);
+        }
+
+        if let Some(effort) = thinking_effort {
+            builder = builder.additional_params(json!({
+                "reasoning_effort": effort
+            }));
+        }
+
+        let agent = builder.build();
 
         // Clone the prior conversation so rig can mutate it with the full
         // exchange (user prompt, tool calls/results, final assistant reply).

@@ -21,6 +21,38 @@ pub struct PpqBalance {
     pub amount_usd: f64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct PpqModel {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub popular: bool,
+    #[serde(default)]
+    pub pricing: PpqModelPricing,
+    #[serde(default)]
+    pub owned_by: String,
+    #[serde(rename = "type", default)]
+    pub model_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[allow(non_snake_case)]
+pub struct PpqModelPricing {
+    #[serde(default)]
+    pub input_per_1M_tokens: f64,
+    #[serde(default)]
+    pub output_per_1M_tokens: f64,
+}
+
+impl PpqModel {
+    pub fn is_expensive(&self) -> bool {
+        self.pricing.output_per_1M_tokens >= 8.0
+    }
+
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PpqMessage {
     pub role: String,
@@ -107,6 +139,23 @@ impl PpqClient {
         let object = unwrap_data(&body);
         let amount_usd = get_f64(object, &["balance", "usd_balance", "amount", "credits"])?;
         Ok(PpqBalance { amount_usd })
+    }
+
+    pub async fn list_models(&self) -> anyhow::Result<Vec<PpqModel>> {
+        let response = self
+            .client
+            .get(format!("{API_BASE}/models"))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        let all: Vec<PpqModel> = serde_json::from_value(
+            body.get("data").cloned().unwrap_or(Value::Array(vec![])),
+        )?;
+        Ok(all
+            .into_iter()
+            .filter(|m| m.model_type == "chat" && m.pricing.input_per_1M_tokens >= 0.0)
+            .collect())
     }
 
     pub async fn chat(&self, api_key: &str, messages: &[PpqMessage]) -> anyhow::Result<String> {

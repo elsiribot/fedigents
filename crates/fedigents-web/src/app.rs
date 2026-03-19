@@ -19,13 +19,17 @@ use crate::agent::{
     SkillSummary, StoredSession, WalletAgent,
 };
 use crate::browser;
-use crate::ppq::{PpqAccount, PpqClient};
+use crate::ppq::{PpqAccount, PpqClient, PpqModel};
 use crate::wallet_runtime::{BootstrapEvent, OperationEvent, WalletRuntime};
+use gloo_storage::{LocalStorage, Storage};
 
 const PPQ_TOPUP_USD: f64 = 0.10;
 const PPQ_LOW_BALANCE_USD: f64 = 0.05;
 const PPQ_BALANCE_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const PPQ_TOPUP_GRACE_MS: f64 = 120_000.0;
+const DEFAULT_MODEL: &str = "openai/gpt-5.4-nano";
+const MODEL_STORAGE_KEY: &str = "fedigents.model";
+const THINKING_EFFORT_KEY: &str = "fedigents.thinking_effort";
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -58,12 +62,28 @@ pub fn App() -> impl IntoView {
     let ppq_low_balance_usd = RwSignal::new(None::<f64>);
     let ppq_topup_in_progress = RwSignal::new(false);
     let ppq_topup_grace_until = Rc::new(RefCell::new(None::<f64>));
+    let selected_model = RwSignal::new(
+        LocalStorage::get::<String>(MODEL_STORAGE_KEY)
+            .unwrap_or_else(|_| DEFAULT_MODEL.to_owned()),
+    );
+    let available_models = RwSignal::new(Vec::<PpqModel>::new());
+    let thinking_effort = RwSignal::new(
+        LocalStorage::get::<String>(THINKING_EFFORT_KEY).unwrap_or_default(),
+    );
+    let low_balance_threshold = RwSignal::new(PPQ_LOW_BALANCE_USD);
     let textarea_ref = NodeRef::<Textarea>::new();
 
     let effect_runtime = Rc::clone(&runtime);
     let effect_agent = Rc::clone(&agent);
     let effect_ppq_topup_grace_until = Rc::clone(&ppq_topup_grace_until);
     Effect::new(move |_| {
+        spawn_local(async move {
+            match PpqClient::new().list_models().await {
+                Ok(models) => available_models.set(models),
+                Err(err) => tracing::warn!("Failed to load PPQ model catalog: {err}"),
+            }
+        });
+
         let runtime_cell = Rc::clone(&effect_runtime);
         let agent_cell = Rc::clone(&effect_agent);
         let ppq_topup_grace_until = Rc::clone(&effect_ppq_topup_grace_until);
@@ -194,6 +214,7 @@ pub fn App() -> impl IntoView {
                                     ppq_low_balance_usd,
                                     ppq_topup_in_progress,
                                     Rc::clone(&ppq_topup_grace_until),
+                                    low_balance_threshold,
                                 );
                                 ready.set(true);
                                 busy.set(false);
@@ -243,6 +264,7 @@ pub fn App() -> impl IntoView {
                                 ppq_low_balance_usd,
                                 ppq_topup_in_progress,
                                 Rc::clone(&ppq_topup_grace_until),
+                                low_balance_threshold,
                             );
                             ready.set(true);
                             busy.set(false);
@@ -263,6 +285,7 @@ pub fn App() -> impl IntoView {
                                     ppq_low_balance_usd,
                                     ppq_topup_in_progress,
                                     Rc::clone(&ppq_topup_grace_until),
+                                    low_balance_threshold,
                                 );
                                 ready.set(true);
                                 busy.set(false);
@@ -305,6 +328,13 @@ pub fn App() -> impl IntoView {
         });
     });
 
+    Effect::new(move |_| {
+        let model_id = selected_model.get();
+        let models = available_models.get();
+        let is_expensive = models.iter().any(|m| m.id == model_id && m.is_expensive());
+        low_balance_threshold.set(if is_expensive { 1.0 } else { PPQ_LOW_BALANCE_USD });
+    });
+
     let submit_prompt: Rc<dyn Fn(String)> = Rc::new({
         let agent = Rc::clone(&agent);
         let runtime = Rc::clone(&runtime);
@@ -335,9 +365,20 @@ pub fn App() -> impl IntoView {
             };
             busy.set(true);
 
+            let model = selected_model.get_untracked();
+            let effort_raw = thinking_effort.get_untracked();
+            let effort = if effort_raw.is_empty() {
+                None
+            } else {
+                Some(effort_raw)
+            };
+
             let runtime_cell = Rc::clone(&runtime);
             spawn_local(async move {
-                match agent_value.respond(&conv, &trimmed).await {
+                match agent_value
+                    .respond(&conv, &trimmed, &model, effort.as_deref())
+                    .await
+                {
                     Ok(response) => {
                         pending_payment.set(response.pending_payment);
                         conversation.set(response.conversation);
@@ -591,6 +632,71 @@ pub fn App() -> impl IntoView {
                                         />
                                         "Debug"
                                     </label>
+                                    <div class="menu-divider"/>
+                                    <div class="menu-section-label">"Model"</div>
+                                    <select class="model-select"
+                                        prop:value=move || selected_model.get()
+                                        on:change=move |ev| {
+                                            let val = event_target_value(&ev);
+                                            selected_model.set(val.clone());
+                                            let _: Result<(), _> = LocalStorage::set(MODEL_STORAGE_KEY, &val);
+                                        }
+                                    >
+                                        {move || {
+                                            let models = available_models.get();
+                                            let current = selected_model.get();
+                                            let mut popular: Vec<_> = models.iter().filter(|m| m.popular).cloned().collect();
+                                            let mut others: Vec<_> = models.iter().filter(|m| !m.popular).cloned().collect();
+                                            if !popular.iter().any(|m| m.id == current) && !others.iter().any(|m| m.id == current) {
+                                                others.insert(0, PpqModel { id: current.clone(), name: current.clone(), ..Default::default() });
+                                            }
+                                            popular.sort_by(|a, b| a.pricing.output_per_1M_tokens.total_cmp(&b.pricing.output_per_1M_tokens));
+                                            others.sort_by(|a, b| a.pricing.output_per_1M_tokens.total_cmp(&b.pricing.output_per_1M_tokens));
+                                            view! {
+                                                <optgroup label="Popular">
+                                                    {popular.into_iter().map(|m| {
+                                                        let sel = m.id == current;
+                                                        let label = format_model_label(&m);
+                                                        view! { <option value={m.id} selected=sel>{label}</option> }
+                                                    }).collect_view()}
+                                                </optgroup>
+                                                <optgroup label="All models">
+                                                    {others.into_iter().map(|m| {
+                                                        let sel = m.id == current;
+                                                        let label = format_model_label(&m);
+                                                        view! { <option value={m.id} selected=sel>{label}</option> }
+                                                    }).collect_view()}
+                                                </optgroup>
+                                            }
+                                        }}
+                                    </select>
+                                    <div class="thinking-effort">
+                                        <span class="thinking-effort-label">"Thinking: " {move || match thinking_effort.get().as_str() {
+                                            "low" => "Low",
+                                            "medium" => "Medium",
+                                            "high" => "High",
+                                            _ => "Off",
+                                        }}</span>
+                                        <input type="range" min="0" max="3" step="1"
+                                            prop:value=move || match thinking_effort.get().as_str() {
+                                                "low" => "1",
+                                                "medium" => "2",
+                                                "high" => "3",
+                                                _ => "0",
+                                            }
+                                            on:input=move |ev| {
+                                                let val = event_target_value(&ev);
+                                                let effort = match val.as_str() {
+                                                    "1" => "low",
+                                                    "2" => "medium",
+                                                    "3" => "high",
+                                                    _ => "",
+                                                };
+                                                thinking_effort.set(effort.to_owned());
+                                                let _: Result<(), _> = LocalStorage::set(THINKING_EFFORT_KEY, effort);
+                                            }
+                                        />
+                                    </div>
                                 </div>
                             }
                         })}
@@ -788,11 +894,8 @@ fn render_message(message: ChatMessage) -> impl IntoView {
         ChatRole::Tool => "tool",
     };
 
-    let html_body = markdown_to_html(&message.body);
-    let qr_codes = extract_payable_strings(&message.body)
-        .into_iter()
-        .filter_map(|s| generate_qr_svg(&s).map(|svg| (s, svg)))
-        .collect::<Vec<_>>();
+    let (clean_body, invoices) = extract_invoice_tags(&message.body);
+    let html_body = markdown_to_html(&clean_body);
 
     view! {
         <article class=format!("message {role_class}")>
@@ -800,22 +903,66 @@ fn render_message(message: ChatMessage) -> impl IntoView {
                 <span class="message-role">{role_label}</span>
             </div>
             <div class="message-body markdown-body" inner_html=html_body></div>
-            {qr_codes.into_iter().map(|(data, svg)| {
-                let data_for_copy = data.clone();
-                view! {
-                    <div class="qr-inline">
-                        <div class="qr-svg" inner_html=svg></div>
-                        <button class="secondary-button qr-copy-btn" on:click=move |_| {
-                            let d = data_for_copy.clone();
-                            spawn_local(async move {
-                                let _ = browser::copy_to_clipboard(&d).await;
-                            });
-                        }>"Copy"</button>
-                    </div>
-                }
-            }).collect_view()}
+            {invoices.into_iter().map(|inv| render_invoice_widget(inv)).collect_view()}
         </article>
     }
+}
+
+fn render_invoice_widget(invoice: String) -> impl IntoView {
+    let truncated = truncate_middle(&invoice, 32);
+    let qr_visible = RwSignal::new(false);
+    let qr_svg = generate_qr_svg(&invoice);
+    let invoice_for_copy = invoice.clone();
+
+    view! {
+        <div class="invoice-widget">
+            <code class="invoice-abbrev">{truncated}</code>
+            <div class="invoice-actions">
+                <button class="secondary-button" on:click=move |_| {
+                    let d = invoice_for_copy.clone();
+                    spawn_local(async move {
+                        let _ = browser::copy_to_clipboard(&d).await;
+                    });
+                }>"Copy"</button>
+                {qr_svg.is_some().then(|| view! {
+                    <button class="secondary-button" on:click=move |_| qr_visible.update(|v| *v = !*v)>
+                        {move || if qr_visible.get() { "Hide QR" } else { "Show QR" }}
+                    </button>
+                })}
+            </div>
+            {qr_svg.map(|svg| view! {
+                <div class="qr-inline" style:display=move || if qr_visible.get() { "flex" } else { "none" }>
+                    <div class="qr-svg" inner_html=svg></div>
+                </div>
+            })}
+        </div>
+    }
+}
+
+/// Extract `<invoice>...</invoice>` tags from the message body, returning
+/// the cleaned text and the list of invoice strings.
+fn extract_invoice_tags(text: &str) -> (String, Vec<String>) {
+    let mut clean = String::with_capacity(text.len());
+    let mut invoices = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<invoice>") {
+        clean.push_str(&rest[..start]);
+        let after_tag = &rest[start + "<invoice>".len()..];
+        if let Some(end) = after_tag.find("</invoice>") {
+            let inv = after_tag[..end].trim().to_owned();
+            if !inv.is_empty() {
+                invoices.push(inv);
+            }
+            rest = &after_tag[end + "</invoice>".len()..];
+        } else {
+            // No closing tag — keep the rest as-is
+            clean.push_str(&rest[start..]);
+            rest = "";
+            break;
+        }
+    }
+    clean.push_str(rest);
+    (clean, invoices)
 }
 
 fn format_balance(sats: u64) -> String {
@@ -859,15 +1006,17 @@ fn start_ppq_balance_watch(
     ppq_low_balance_usd: RwSignal<Option<f64>>,
     ppq_topup_in_progress: RwSignal<bool>,
     ppq_topup_grace_until: Rc<RefCell<Option<f64>>>,
+    low_balance_threshold: RwSignal<f64>,
 ) {
     spawn_local(async move {
         loop {
             match ppq.balance(&account).await {
                 Ok(balance) => {
+                    let threshold = low_balance_threshold.get_untracked();
                     let in_grace = ppq_topup_grace_until
                         .borrow()
                         .is_some_and(|until| until > Date::now());
-                    if balance.amount_usd >= PPQ_LOW_BALANCE_USD {
+                    if balance.amount_usd >= threshold {
                         *ppq_topup_grace_until.borrow_mut() = None;
                         ppq_low_balance_usd.set(None);
                     } else if !ppq_topup_in_progress.get_untracked() && !in_grace {
@@ -909,26 +1058,14 @@ fn generate_qr_svg(data: &str) -> Option<String> {
     )
 }
 
-fn extract_payable_strings(text: &str) -> Vec<String> {
-    let mut results = Vec::new();
-    for word in text.split(|c: char| c.is_whitespace() || c == '`' || c == '\'' || c == '"') {
-        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if trimmed.is_empty() {
-            continue;
-        }
-        let lower = trimmed.to_lowercase();
-        if lower.starts_with("lnbc")
-            || lower.starts_with("lnurl")
-            || lower.starts_with("lightning:")
-            || lower.starts_with("bitcoin:")
-        {
-            if trimmed.len() > 20 {
-                results.push(trimmed.to_owned());
-            }
-        }
+
+fn format_model_label(model: &PpqModel) -> String {
+    let out = model.pricing.output_per_1M_tokens;
+    if out <= 0.0 {
+        model.name.clone()
+    } else {
+        format!("{} (${:.2}/M out)", model.name, out)
     }
-    results.dedup();
-    results
 }
 
 fn event_target_value(ev: &web_sys::Event) -> String {
