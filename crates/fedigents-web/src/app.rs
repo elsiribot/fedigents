@@ -505,7 +505,8 @@ pub fn App() -> impl IntoView {
             spawn_local(async move {
                 let ppq = PpqClient::new();
                 let result = async {
-                    let topup = ppq.create_lightning_topup(&account, PPQ_TOPUP_USD).await?;
+                    let topup_usd = low_balance_threshold.get_untracked();
+                    let topup = ppq.create_lightning_topup(&account, topup_usd).await?;
                     runtime_value.pay(&topup.invoice, None).await?;
                     anyhow::Ok(())
                 }
@@ -554,7 +555,10 @@ pub fn App() -> impl IntoView {
                     <div class="ppq-topup-copy">
                         <div class="ppq-topup-title">"Low PPQ balance"</div>
                         <div class="ppq-topup-body">
-                            {move || ppq_low_balance_usd.get().map(|usd| format!("PPQ credit is down to ${usd:.2}. Top up $0.10 now?")).unwrap_or_default()}
+                            {move || ppq_low_balance_usd.get().map(|usd| {
+                                let topup = low_balance_threshold.get();
+                                format!("PPQ credit is down to ${usd:.2}. Top up ${topup:.2} now?")
+                            }).unwrap_or_default()}
                         </div>
                     </div>
                     <button
@@ -563,7 +567,16 @@ pub fn App() -> impl IntoView {
                         on:click=top_up_ppq
                         disabled=move || ppq_topup_in_progress.get()
                     >
-                        {move || if ppq_topup_in_progress.get() { "Topping up..." } else { "Top up 10c" }}
+                        {move || if ppq_topup_in_progress.get() {
+                            "Topping up...".to_owned()
+                        } else {
+                            let topup = low_balance_threshold.get();
+                            if topup < 1.0 {
+                                format!("Top up {:.0}c", topup * 100.0)
+                            } else {
+                                format!("Top up ${topup:.2}")
+                            }
+                        }}
                     </button>
                 </div>
                 <header class="topbar">
