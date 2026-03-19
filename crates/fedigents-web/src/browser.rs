@@ -18,6 +18,15 @@ extern "C" {
 
     #[wasm_bindgen(js_name = supportsSyncAccessHandles)]
     pub fn supports_sync_access_handles_js() -> bool;
+
+    #[wasm_bindgen(catch, js_name = startRecording)]
+    pub fn start_recording() -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = stopRecording)]
+    pub fn stop_recording() -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_name = transcribeAudio)]
+    pub fn transcribe_audio(blob: &JsValue, api_key: &str) -> Result<Promise, JsValue>;
 }
 
 pub async fn open_wallet_handle(file_name: &str) -> anyhow::Result<FileSystemSyncAccessHandle> {
@@ -58,6 +67,37 @@ pub async fn copy_to_clipboard(value: &str) -> anyhow::Result<()> {
         .await
         .map_err(js_error)?;
     Ok(())
+}
+
+pub async fn begin_recording() -> anyhow::Result<()> {
+    let promise = start_recording().map_err(js_error)?;
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(js_error)?;
+    Ok(())
+}
+
+pub async fn cancel_recording() {
+    if let Ok(promise) = stop_recording() {
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+pub async fn finish_recording_and_transcribe(api_key: &str) -> anyhow::Result<String> {
+    let promise = stop_recording().map_err(js_error)?;
+    let blob = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(js_error)?;
+    if blob.is_null() || blob.is_undefined() {
+        anyhow::bail!("No audio recorded");
+    }
+    let promise = transcribe_audio(&blob, api_key).map_err(js_error)?;
+    let result = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(js_error)?;
+    result
+        .as_string()
+        .ok_or_else(|| anyhow::anyhow!("Transcription returned non-string"))
 }
 
 fn js_error(err: JsValue) -> anyhow::Error {

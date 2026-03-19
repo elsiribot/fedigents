@@ -70,6 +70,51 @@ export async function stopQrScanner(video) {
   }
 }
 
+let mediaRecorder = null;
+let audioChunks = [];
+
+export async function startRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  audioChunks = [];
+  mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+  mediaRecorder.addEventListener("dataavailable", (e) => {
+    if (e.data.size > 0) audioChunks.push(e.data);
+  });
+  mediaRecorder.start();
+}
+
+export async function stopRecording() {
+  if (!mediaRecorder || mediaRecorder.state === "inactive") return null;
+  return new Promise((resolve) => {
+    mediaRecorder.addEventListener("stop", () => {
+      const blob = new Blob(audioChunks, { type: "audio/webm" });
+      for (const track of mediaRecorder.stream.getTracks()) track.stop();
+      mediaRecorder = null;
+      audioChunks = [];
+      resolve(blob);
+    });
+    mediaRecorder.stop();
+  });
+}
+
+export async function transcribeAudio(blob, apiKey) {
+  const form = new FormData();
+  form.append("file", blob, "recording.webm");
+  form.append("model", "nova-3");
+  form.append("response_format", "json");
+  const resp = await fetch("https://api.ppq.sirion.io/api/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`STT error ${resp.status}: ${text}`);
+  }
+  const data = await resp.json();
+  return data.text || "";
+}
+
 export async function startQrScanner(video, callback) {
   if (!("BarcodeDetector" in globalThis)) {
     throw new Error("BarcodeDetector is not available in this browser.");

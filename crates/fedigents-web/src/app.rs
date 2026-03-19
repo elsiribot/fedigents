@@ -568,9 +568,15 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let recording = RwSignal::new(false);
+    let transcribing = RwSignal::new(false);
+    let rec_drag_x = RwSignal::new(0.0_f64);
+    let rec_start_x = RwSignal::new(0.0_f64);
+    let rec_cancelled = RwSignal::new(false);
     let scan_submit = Rc::clone(&submit_prompt);
     let form_submit = Rc::clone(&submit_prompt);
     let key_submit = Rc::clone(&submit_prompt);
+    let voice_submit = Rc::clone(&submit_prompt);
 
     view! {
         <div class="shell">
@@ -822,6 +828,14 @@ pub fn App() -> impl IntoView {
                             }
                         }}
                         <div
+                            class="transcribing-indicator"
+                            style:display=move || if transcribing.get() { "flex" } else { "none" }
+                        >
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                            <span class="typing-dot"></span>
+                        </div>
+                        <div
                             class="typing-indicator"
                             style:display=move || if busy.get() && ready.get() { "flex" } else { "none" }
                         >
@@ -903,8 +917,103 @@ pub fn App() -> impl IntoView {
                             placeholder="Send a message..."
                             disabled=move || !ready.get() || busy.get()
                         ></textarea>
-                        <button type="submit" disabled=move || !ready.get() || busy.get()></button>
+                        <button type="submit" class="send-button"
+                            style:display=move || if prompt.get().trim().is_empty() { "none" } else { "flex" }
+                            disabled=move || !ready.get() || busy.get()
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="19" x2="12" y2="5"/>
+                                <polyline points="5 12 12 5 19 12"/>
+                            </svg>
+                        </button>
+                        <button
+                            type="button"
+                            class="mic-button"
+                            style:display=move || if prompt.get().trim().is_empty() && !recording.get() { "flex" } else { "none" }
+                            disabled=move || !ready.get() || busy.get() || transcribing.get()
+                            on:pointerdown=move |ev: web_sys::PointerEvent| {
+                                ev.prevent_default();
+                                rec_start_x.set(ev.client_x() as f64);
+                                rec_drag_x.set(0.0);
+                                rec_cancelled.set(false);
+                                recording.set(true);
+                                spawn_local(async move {
+                                    if let Err(e) = browser::begin_recording().await {
+                                        leptos::logging::warn!("Failed to start recording: {e}");
+                                        recording.set(false);
+                                    }
+                                });
+                            }
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="1" width="6" height="14" rx="3"/>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                <line x1="12" y1="19" x2="12" y2="23"/>
+                                <line x1="8" y1="23" x2="16" y2="23"/>
+                            </svg>
+                        </button>
                     </form>
+                    <div
+                        class="recording-bar"
+                        class:over-trash=move || rec_drag_x.get() < -30.0
+                        style:display=move || if recording.get() { "flex" } else { "none" }
+                        on:pointermove=move |ev: web_sys::PointerEvent| {
+                            if !recording.get_untracked() { return; }
+                            let dx = ev.client_x() as f64 - rec_start_x.get_untracked();
+                            rec_drag_x.set(dx.clamp(-40.0, 0.0));
+                        }
+                        on:pointerup={
+                            let voice_submit = voice_submit.clone();
+                            move |_| {
+                                if !recording.get_untracked() { return; }
+                                let cancelled = rec_drag_x.get_untracked() < -30.0;
+                                recording.set(false);
+                                rec_drag_x.set(0.0);
+                                if cancelled {
+                                    spawn_local(async move {
+                                        browser::cancel_recording().await;
+                                    });
+                                } else {
+                                    let submit = voice_submit.clone();
+                                    let api_key = ppq_account.get_untracked().map(|a| a.api_key.clone()).unwrap_or_default();
+                                    transcribing.set(true);
+                                    spawn_local(async move {
+                                        match browser::finish_recording_and_transcribe(&api_key).await {
+                                            Ok(text) if !text.trim().is_empty() => submit(text),
+                                            Ok(_) => leptos::logging::warn!("Transcription returned empty text"),
+                                            Err(e) => leptos::logging::warn!("Transcription failed: {e}"),
+                                        }
+                                        transcribing.set(false);
+                                    });
+                                }
+                            }
+                        }
+                        on:pointercancel=move |_| {
+                            if !recording.get_untracked() { return; }
+                            recording.set(false);
+                            rec_drag_x.set(0.0);
+                            spawn_local(async move {
+                                browser::cancel_recording().await;
+                            });
+                        }
+                    >
+                        <span class="rec-dot"></span>
+                        <span class="rec-label">"< Slide to cancel"</span>
+                        <div class="trash-zone">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            </svg>
+                        </div>
+                        <div class="rec-mic-icon" style:transform=move || format!("translateX({}px)", rec_drag_x.get())>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="9" y="1" width="6" height="14" rx="3"/>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                                <line x1="12" y1="19" x2="12" y2="23"/>
+                                <line x1="8" y1="23" x2="16" y2="23"/>
+                            </svg>
+                        </div>
+                    </div>
                 </footer>
 
                 <div style:display=move || if scanner_open.get() { "flex" } else { "none" } class="scanner-overlay" on:click=move |_| scanner_open.set(false)>
