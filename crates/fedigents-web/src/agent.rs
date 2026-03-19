@@ -268,13 +268,15 @@ struct CalculateArgs {
     expression: String,
 }
 
-/// Convert an amount in satoshis to a fiat currency using live exchange rates.
+/// Convert an amount between any two currencies using live exchange rates. Supports sat, BTC, USD, EUR, GBP, and all currencies from the price feed. Examples: convert_currency(amount=100, from="USD", to="sat") or convert_currency(amount=50000, from="sat", to="USD").
 #[derive(Deserialize, JsonSchema)]
-struct ConvertSatsArgs {
-    /// Amount in satoshis
-    amount_sats: u64,
-    /// Target currency code, e.g. "USD", "EUR", "GBP"
-    currency: String,
+struct ConvertCurrencyArgs {
+    /// The numeric amount to convert
+    amount: f64,
+    /// Source currency code, e.g. "sat", "BTC", "USD", "EUR"
+    from: String,
+    /// Target currency code, e.g. "sat", "BTC", "USD", "EUR"
+    to: String,
 }
 
 /// Make an HTTP request. For authenticated APIs (like PPQ), you MUST include an Authorization header. Always set headers explicitly — they are NOT added automatically.
@@ -496,7 +498,7 @@ enum WalletTool {
     Calculate {
         log: Rc<ToolLog>,
     },
-    ConvertSats {
+    ConvertCurrency {
         log: Rc<ToolLog>,
     },
     HttpRequest {
@@ -521,7 +523,7 @@ impl ToolDyn for WalletTool {
             Self::ShowReceiveCode { .. } => "show_receive_code",
             Self::LoadSkill { .. } => "load_skill",
             Self::Calculate { .. } => "calculate",
-            Self::ConvertSats { .. } => "convert_sats",
+            Self::ConvertCurrency { .. } => "convert_currency",
             Self::HttpRequest { .. } => "http_request",
             Self::KvStore { .. } => "kv_store",
             Self::Skills { .. } => "skills",
@@ -544,7 +546,7 @@ impl ToolDyn for WalletTool {
             }
             Self::LoadSkill { .. } => tool_definition::<LoadSkillArgs>("load_skill"),
             Self::Calculate { .. } => tool_definition::<CalculateArgs>("calculate"),
-            Self::ConvertSats { .. } => tool_definition::<ConvertSatsArgs>("convert_sats"),
+            Self::ConvertCurrency { .. } => tool_definition::<ConvertCurrencyArgs>("convert_currency"),
             Self::HttpRequest { .. } => tool_definition::<HttpRequestArgs>("http_request"),
             Self::KvStore { .. } => tool_definition::<KvStoreArgs>("kv_store"),
             Self::Skills { .. } => tool_definition::<SkillsArgs>("skills"),
@@ -669,21 +671,22 @@ impl ToolDyn for WalletTool {
                     log.push(ChatRole::Tool, format!("calculate => {result_str}"));
                     Ok(result_str)
                 }
-                Self::ConvertSats { log } => {
-                    let args: ConvertSatsArgs =
+                Self::ConvertCurrency { log } => {
+                    let args: ConvertCurrencyArgs =
                         serde_json::from_str(&args).map_err(ToolError::JsonError)?;
-                    let currency = args.currency.to_uppercase();
+                    let from = args.from.to_uppercase();
+                    let to = args.to.to_uppercase();
                     log.push(
                         ChatRole::Tool,
                         format!(
-                            "[tool call] convert_sats({}, {})",
-                            args.amount_sats, currency
+                            "[tool call] convert_currency({}, {}, {})",
+                            args.amount, from, to
                         ),
                     );
-                    let result = convert_sats_to_currency(args.amount_sats, &currency)
+                    let result = convert_currency(args.amount, &from, &to)
                         .await
                         .map_err(tool_call_error)?;
-                    log.push(ChatRole::Tool, format!("convert_sats => {result}"));
+                    log.push(ChatRole::Tool, format!("convert_currency => {result}"));
                     Ok(result)
                 }
                 Self::HttpRequest { log } => {
@@ -769,7 +772,10 @@ impl ToolDyn for WalletTool {
 
 const PRICE_FEED_URL: &str = "https://price-feed.dev.fedibtc.com/latest";
 
-async fn convert_sats_to_currency(amount_sats: u64, currency: &str) -> anyhow::Result<String> {
+/// Convert `amount` from one currency to another.
+/// Recognised codes: SAT (or SATS), BTC, USD, EUR, GBP, and anything the
+/// price feed carries as a `CURRENCY/USD` pair.
+async fn convert_currency(amount: f64, from: &str, to: &str) -> anyhow::Result<String> {
     let resp: serde_json::Value = reqwest::get(PRICE_FEED_URL)
         .await?
         .error_for_status()?
@@ -786,47 +792,32 @@ async fn convert_sats_to_currency(amount_sats: u64, currency: &str) -> anyhow::R
         .and_then(|v| v.as_f64())
         .ok_or_else(|| anyhow::anyhow!("BTC/USD rate not found"))?;
 
-    let btc_value = amount_sats as f64 / 100_000_000.0;
+    // Helper: get the USD value of 1 unit of `code`.
+    let usd_per_unit = |code: &str| -> anyhow::Result<f64> {
+        match code {
+            "SAT" | "SATS" => Ok(btc_usd / 100_000_000.0),
+            "BTC" => Ok(btc_usd),
+            "USD" => Ok(1.0),
+            other => {
+                let key = format!("{other}/USD");
+                prices
+                    .get(&key)
+                    .and_then(|v| v.get("rate"))
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow::anyhow!("Currency {other} not found in price feed"))
+            }
+        }
+    };
 
-    if currency == "BTC" {
-        return Ok(json!({
-            "amount_sats": amount_sats,
-            "amount_btc": btc_value,
-            "currency": "BTC"
-        })
-        .to_string());
-    }
-
-    let usd_value = btc_value * btc_usd;
-
-    if currency == "USD" {
-        return Ok(json!({
-            "amount_sats": amount_sats,
-            "amount_usd": format!("{usd_value:.2}"),
-            "currency": "USD",
-            "btc_usd_rate": btc_usd
-        })
-        .to_string());
-    }
-
-    // For other currencies, look up CURRENCY/USD rate and convert
-    let key = format!("{currency}/USD");
-    let currency_per_usd = prices
-        .get(&key)
-        .and_then(|v| v.get("rate"))
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| anyhow::anyhow!("Currency {currency} not found in price feed"))?;
-
-    // rate is CURRENCY/USD, meaning 1 unit of currency = rate USD
-    // So to convert USD to currency: amount_currency = usd_value / currency_per_usd
-    let converted = usd_value / currency_per_usd;
+    let from_usd = usd_per_unit(from)?;
+    let to_usd = usd_per_unit(to)?;
+    let converted = amount * from_usd / to_usd;
 
     Ok(json!({
-        "amount_sats": amount_sats,
-        "converted": format!("{converted:.2}"),
-        "currency": currency,
-        "btc_usd_rate": btc_usd,
-        "currency_usd_rate": currency_per_usd
+        "amount": amount,
+        "from": from,
+        "to": to,
+        "result": converted,
     })
     .to_string())
 }
@@ -1169,7 +1160,7 @@ impl WalletAgent {
             Box::new(WalletTool::Calculate {
                 log: Rc::clone(&log),
             }),
-            Box::new(WalletTool::ConvertSats {
+            Box::new(WalletTool::ConvertCurrency {
                 log: Rc::clone(&log),
             }),
             Box::new(WalletTool::HttpRequest {
