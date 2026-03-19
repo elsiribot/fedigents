@@ -504,10 +504,26 @@ input {
   margin-top: var(--spacing-sm);
 }
 
+.invoice-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
 .invoice-abbrev {
   font-size: var(--font-size-small);
   word-break: break-all;
   color: var(--color-dark-grey);
+}
+
+.invoice-paid-badge {
+  font-size: var(--font-size-small);
+  font-weight: 600;
+  color: var(--color-green);
+  background: rgba(0, 168, 42, 0.1);
+  padding: 2px var(--spacing-sm);
+  border-radius: 4px;
+  white-space: nowrap;
 }
 
 .invoice-actions {

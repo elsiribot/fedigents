@@ -24,7 +24,10 @@ pub enum BootstrapEvent {
 
 #[derive(Clone, Debug)]
 pub enum OperationEvent {
-    PaymentReceived { amount_sats: Option<u64> },
+    PaymentReceived {
+        amount_sats: Option<u64>,
+        invoice: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -268,8 +271,12 @@ async fn handle_request(
             let scope = scope.clone();
             with_runtime(&runtime, move |wallet| async move {
                 let (op_id, response) = wallet.create_invoice(amount_sats, &description).await?;
+                let invoice_str = response.invoice.clone();
                 wallet.spawn_receive_watcher(op_id, false, Some(amount_sats), move |amt| {
-                    let event = WireOperationEvent::PaymentReceived { amount_sats: amt };
+                    let event = WireOperationEvent::PaymentReceived {
+                        amount_sats: amt,
+                        invoice: Some(invoice_str),
+                    };
                     let _ = post_message(&scope, &WorkerEventEnvelope::operation(event));
                 });
                 Ok(InvoiceResponse {
@@ -298,8 +305,10 @@ async fn handle_request(
             with_runtime(&runtime, move |wallet| async move {
                 wallet
                     .watch_pending_receives(move |amount_sats| {
-                        let event =
-                            WireOperationEvent::PaymentReceived { amount_sats };
+                        let event = WireOperationEvent::PaymentReceived {
+                            amount_sats,
+                            invoice: None,
+                        };
                         let _ =
                             post_message(&scope, &WorkerEventEnvelope::operation(event));
                     })
@@ -573,15 +582,23 @@ impl WireBootstrapEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireOperationEvent {
-    PaymentReceived { amount_sats: Option<u64> },
+    PaymentReceived {
+        amount_sats: Option<u64>,
+        #[serde(default)]
+        invoice: Option<String>,
+    },
 }
 
 impl WireOperationEvent {
     fn into_public(self) -> OperationEvent {
         match self {
-            Self::PaymentReceived { amount_sats } => {
-                OperationEvent::PaymentReceived { amount_sats }
-            }
+            Self::PaymentReceived {
+                amount_sats,
+                invoice,
+            } => OperationEvent::PaymentReceived {
+                amount_sats,
+                invoice,
+            },
         }
     }
 }

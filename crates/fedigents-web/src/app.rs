@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -57,6 +58,8 @@ pub fn App() -> impl IntoView {
     let payment_result = RwSignal::new(None::<Result<String, String>>);
     let scanner_open = RwSignal::new(false);
     let debug_mode = RwSignal::new(false);
+    let paid_invoices: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
+    let payment_received_trigger: RwSignal<Option<String>> = RwSignal::new(None);
     let menu_open = RwSignal::new(false);
     let ppq_account = RwSignal::new(None::<PpqAccount>);
     let ppq_low_balance_usd = RwSignal::new(None::<f64>);
@@ -159,12 +162,16 @@ pub fn App() -> impl IntoView {
                 let listener_wallet = wallet.clone();
                 let watcher_wallet = wallet.clone();
                 wallet.set_operation_listener(Some(Rc::new(move |event| match event {
-                    OperationEvent::PaymentReceived { amount_sats } => {
+                    OperationEvent::PaymentReceived { amount_sats, invoice } => {
+                        if let Some(inv) = &invoice {
+                            paid_invoices.update(|set| { set.insert(inv.clone()); });
+                        }
                         let msg = match amount_sats {
                             Some(sats) => format!("Incoming payment of {sats} sats received."),
                             None => "Incoming payment received.".to_owned(),
                         };
-                        push_message(&messages, onboarding_message(msg));
+                        push_message(&messages, onboarding_message(msg.clone()));
+                        payment_received_trigger.set(Some(msg));
                         let wallet = listener_wallet.clone();
                         spawn_local(async move {
                             if let Ok(sats) = wallet.get_balance().await {
@@ -413,6 +420,18 @@ pub fn App() -> impl IntoView {
             });
         }
     });
+
+    // When a payment is received, notify the agent so it can do follow-up tasks.
+    {
+        let submit = Rc::clone(&submit_prompt);
+        Effect::new(move |_| {
+            if let Some(msg) = payment_received_trigger.get() {
+                // Clear first to avoid re-triggering, then submit.
+                payment_received_trigger.update(|v| *v = None);
+                submit(msg);
+            }
+        });
+    }
 
     let confirm_payment = {
         let runtime = Rc::clone(&runtime);
@@ -790,7 +809,7 @@ pub fn App() -> impl IntoView {
                                 .get()
                                 .into_iter()
                                 .filter(|m| show_debug || matches!(m.role, ChatRole::User | ChatRole::Assistant))
-                                .map(render_message)
+                                .map(|m| render_message(m, paid_invoices))
                                 .collect_view();
 
                             view! {
@@ -905,7 +924,7 @@ pub fn App() -> impl IntoView {
     }
 }
 
-fn render_message(message: ChatMessage) -> impl IntoView {
+fn render_message(message: ChatMessage, paid_invoices: RwSignal<HashSet<String>>) -> impl IntoView {
     let role_class = match message.role {
         ChatRole::System => "system",
         ChatRole::User => "user",
@@ -928,20 +947,26 @@ fn render_message(message: ChatMessage) -> impl IntoView {
                 <span class="message-role">{role_label}</span>
             </div>
             <div class="message-body markdown-body" inner_html=html_body></div>
-            {invoices.into_iter().map(|inv| render_invoice_widget(inv)).collect_view()}
+            {invoices.into_iter().map(|inv| render_invoice_widget(inv, paid_invoices)).collect_view()}
         </article>
     }
 }
 
-fn render_invoice_widget(invoice: String) -> impl IntoView {
+fn render_invoice_widget(invoice: String, paid_invoices: RwSignal<HashSet<String>>) -> impl IntoView {
     let truncated = truncate_middle(&invoice, 32);
     let qr_visible = RwSignal::new(false);
     let qr_svg = generate_qr_svg(&invoice);
     let invoice_for_copy = invoice.clone();
+    let invoice_for_paid = invoice.clone();
 
     view! {
         <div class="invoice-widget">
-            <code class="invoice-abbrev">{truncated}</code>
+            <div class="invoice-header">
+                <code class="invoice-abbrev">{truncated}</code>
+                {move || paid_invoices.get().contains(&invoice_for_paid).then(|| view! {
+                    <span class="invoice-paid-badge">"Paid"</span>
+                })}
+            </div>
             <div class="invoice-actions">
                 <button class="secondary-button" on:click=move |_| {
                     let d = invoice_for_copy.clone();
