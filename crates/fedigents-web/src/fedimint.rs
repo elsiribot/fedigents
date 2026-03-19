@@ -348,8 +348,8 @@ impl WalletRuntimeCore {
             .paginate_operations_rev(limit, None)
             .await;
 
-        // Subscribe to non-final operations so the caching side effect can
-        // resolve them, then give them 200ms to settle.
+        // Subscribe to non-final operations and consume their update
+        // streams fully (until None) so the client caches the outcomes.
         let mut pending = Vec::new();
         let ln = client
             .get_first_module::<LightningClientModule>()?
@@ -368,13 +368,7 @@ impl WalletRuntimeCore {
                     if let Ok(sub) = ln.subscribe_ln_receive(operation_id).await {
                         pending.push(Box::pin(async move {
                             let mut stream = sub.into_stream();
-                            while let Some(state) = stream.next().await {
-                                match state {
-                                    LnReceiveState::Claimed
-                                    | LnReceiveState::Canceled { .. } => break,
-                                    _ => {}
-                                }
-                            }
+                            while stream.next().await.is_some() {}
                         })
                             as std::pin::Pin<Box<dyn futures::Future<Output = ()>>>);
                     }
@@ -383,13 +377,7 @@ impl WalletRuntimeCore {
                     if let Ok(sub) = ln.subscribe_ln_recurring_receive(operation_id).await {
                         pending.push(Box::pin(async move {
                             let mut stream = sub.into_stream();
-                            while let Some(state) = stream.next().await {
-                                match state {
-                                    LnReceiveState::Claimed
-                                    | LnReceiveState::Canceled { .. } => break,
-                                    _ => {}
-                                }
-                            }
+                            while stream.next().await.is_some() {}
                         }));
                     }
                 }
@@ -397,14 +385,7 @@ impl WalletRuntimeCore {
                     if let Ok(sub) = ln.subscribe_ln_pay(operation_id).await {
                         pending.push(Box::pin(async move {
                             let mut stream = sub.into_stream();
-                            while let Some(state) = stream.next().await {
-                                match state {
-                                    LnPayState::Success { .. }
-                                    | LnPayState::Refunded { .. }
-                                    | LnPayState::UnexpectedError { .. } => break,
-                                    _ => {}
-                                }
-                            }
+                            while stream.next().await.is_some() {}
                         }));
                     }
                 }
