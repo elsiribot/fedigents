@@ -14,7 +14,7 @@ fedimint-core = "0.10.0"
 fedimint-cursed-redb = "0.10.0"
 fedimint-derive-secret = "0.10.0"
 fedimint-eventlog = "0.10.0"
-fedimint-ln-client = { version = "0.10.0", features = ["cli"] }
+fedimint-ln-client = "0.10.0"
 fedimint-meta-client = "0.10.0"
 fedimint-meta-common = "0.10.0"
 fedimint-mint-client = "0.10.0"

@@ -2,9 +2,15 @@
 dist = "dist"
 target = "crates/fedigents-web/index.html"
 filehash = false
+minify = "on_release"
 
 [watch]
 watch = ["crates/fedigents-web", "public", "skills"]
+
+[[hooks]]
+stage = "post_build"
+command = "wasm-opt"
+command_arguments = ["-Oz", "--all-features", "-o", "dist/.stage/fedigents-web_bg.wasm", "dist/.stage/fedigents-web_bg.wasm"]
 
 [serve]
 addresses = ["127.0.0.1"]
