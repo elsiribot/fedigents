@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
+use futures::future::join3;
 use gloo_timers::future::sleep;
 use js_sys::Date;
 use leptos::ev::{KeyboardEvent, MouseEvent, SubmitEvent};
@@ -76,6 +77,8 @@ pub fn App() -> impl IntoView {
     );
     let low_balance_threshold = RwSignal::new(PPQ_LOW_BALANCE_USD);
     let textarea_ref = NodeRef::<Textarea>::new();
+    let onboard_progress = RwSignal::new(0.0_f64);
+    let onboard_steps = RwSignal::new(Vec::<String>::new());
 
     let effect_runtime = Rc::clone(&runtime);
     let effect_agent = Rc::clone(&agent);
@@ -92,14 +95,42 @@ pub fn App() -> impl IntoView {
         let agent_cell = Rc::clone(&effect_agent);
         let ppq_topup_grace_until = Rc::clone(&effect_ppq_topup_grace_until);
         spawn_local(async move {
-            if let Err(err) = browser::ensure_service_worker().await {
+            // Helper closures for progress tracking.
+            let add_step = |label: &str| {
+                let label = label.to_owned();
+                onboard_steps.update(|v| v.push(label));
+            };
+            let remove_step = |label: &str| {
+                let label = label.to_owned();
+                onboard_steps.update(|v| v.retain(|s| *s != label));
+            };
+            let advance = |frac: f64| {
+                onboard_progress.update(|p| *p = (*p + frac).min(1.0));
+            };
+
+            // --- Phase 1: parallel init (service worker, skills, wallet) ---
+            add_step("Registering service worker");
+            add_step("Loading skill catalog");
+            add_step("Connecting wallet");
+
+            let sw_fut = browser::ensure_service_worker();
+            let skills_fut = load_skills();
+            let wallet_fut = WalletRuntime::connect();
+            let (sw_res, skills_res, wallet_res) = join3(sw_fut, skills_fut, wallet_fut).await;
+
+            // Process results.
+            remove_step("Registering service worker");
+            advance(0.10);
+            if let Err(err) = sw_res {
                 push_message(
                     &messages,
                     onboarding_message(format!("Service worker registration failed: {err}")),
                 );
             }
 
-            match load_skills().await {
+            remove_step("Loading skill catalog");
+            advance(0.10);
+            match skills_res {
                 Ok(loaded) => skills.set(loaded),
                 Err(err) => push_message(
                     &messages,
@@ -107,11 +138,14 @@ pub fn App() -> impl IntoView {
                 ),
             }
 
-            let wallet = match WalletRuntime::connect().await {
+            remove_step("Connecting wallet");
+            advance(0.10);
+            let wallet = match wallet_res {
                 Ok(runtime_value) => runtime_value,
                 Err(err) => {
                     status.set("Wallet failed to boot".to_owned());
                     busy.set(false);
+                    onboard_progress.set(0.0);
                     push_message(
                         &messages,
                         onboarding_message(format!("Wallet setup failed: {err}")),
@@ -126,6 +160,8 @@ pub fn App() -> impl IntoView {
 
             runtime_cell.borrow_mut().replace(wallet.clone());
 
+            // --- Phase 2: bootstrap wallet ---
+            add_step("Bootstrapping wallet");
             let bootstrap_result = wallet
                 .bootstrap(move |event| match event {
                     BootstrapEvent::Note(note) => {
@@ -147,9 +183,13 @@ pub fn App() -> impl IntoView {
                 })
                 .await;
 
+            remove_step("Bootstrapping wallet");
+            advance(0.35);
+
             if let Err(err) = bootstrap_result {
                 status.set("Wallet bootstrap failed".to_owned());
                 busy.set(false);
+                onboard_progress.set(0.0);
                 push_message(
                     &messages,
                     onboarding_message(format!("Bootstrap failed: {err}")),
@@ -187,10 +227,12 @@ pub fn App() -> impl IntoView {
                 });
             }
 
+            // --- Phase 3: PPQ setup ---
             match wallet.is_ppq_ready().await {
                 Ok(false) => {
                     if let Ok(true) = wallet.ppq_funding_in_flight().await {
                         busy.set(false);
+                        onboard_progress.set(0.0);
                         status.set("PPQ setup needs recovery".to_owned());
                         push_message(
                             &messages,
@@ -202,13 +244,20 @@ pub fn App() -> impl IntoView {
                     }
 
                     let ppq = PpqClient::new();
+                    add_step("Creating PPQ account");
                     push_message(
                         &messages,
                         onboarding_message("Creating a PPQ account and funding it with $0.10..."),
                     );
                     match fund_ppq(&wallet, &ppq).await {
-                        Ok(account) => match wallet.mark_ppq_ready().await {
+                        Ok(account) => {
+                            remove_step("Creating PPQ account");
+                            advance(0.15);
+                            add_step("Finalizing setup");
+                            match wallet.mark_ppq_ready().await {
                             Ok(()) => {
+                                remove_step("Finalizing setup");
+                                advance(0.20);
                                 agent_cell.borrow_mut().replace(WalletAgent::new(
                                     wallet.clone(),
                                     ppq,
@@ -236,7 +285,9 @@ pub fn App() -> impl IntoView {
                                 );
                             }
                             Err(err) => {
+                                remove_step("Finalizing setup");
                                 busy.set(false);
+                                onboard_progress.set(0.0);
                                 status.set("PPQ setup needs recovery".to_owned());
                                 push_message(
                                     &messages,
@@ -245,9 +296,11 @@ pub fn App() -> impl IntoView {
                                     )),
                                 );
                             }
-                        },
+                        }},
                         Err(err) => {
+                            remove_step("Creating PPQ account");
                             busy.set(false);
+                            onboard_progress.set(0.0);
                             status.set("PPQ funding failed".to_owned());
                             push_message(
                                 &messages,
@@ -257,9 +310,12 @@ pub fn App() -> impl IntoView {
                     }
                 }
                 Ok(true) => {
+                    add_step("Loading account");
                     let ppq = PpqClient::new();
                     match wallet.ppq_account().await {
                         Ok(Some(account)) => {
+                            remove_step("Loading account");
+                            advance(0.35);
                             agent_cell.borrow_mut().replace(WalletAgent::new(
                                 wallet.clone(),
                                 ppq,
@@ -282,6 +338,8 @@ pub fn App() -> impl IntoView {
                         }
                         Ok(None) => match wallet.repair_ppq_account().await {
                             Ok(account) => {
+                                remove_step("Loading account");
+                                advance(0.35);
                                 agent_cell.borrow_mut().replace(WalletAgent::new(
                                     wallet.clone(),
                                     ppq,
@@ -309,7 +367,9 @@ pub fn App() -> impl IntoView {
                                 );
                             }
                             Err(err) => {
+                                remove_step("Loading account");
                                 busy.set(false);
+                                onboard_progress.set(0.0);
                                 status.set("PPQ account unavailable".to_owned());
                                 push_message(
                                     &messages,
@@ -318,7 +378,9 @@ pub fn App() -> impl IntoView {
                             }
                         },
                         Err(err) => {
+                            remove_step("Loading account");
                             busy.set(false);
+                            onboard_progress.set(0.0);
                             status.set("PPQ account unavailable".to_owned());
                             push_message(
                                 &messages,
@@ -329,6 +391,7 @@ pub fn App() -> impl IntoView {
                 }
                 Err(err) => {
                     busy.set(false);
+                    onboard_progress.set(0.0);
                     status.set("PPQ state unavailable".to_owned());
                     push_message(
                         &messages,
@@ -778,6 +841,27 @@ pub fn App() -> impl IntoView {
                 </header>
 
                 <section class="chat-panel">
+                    <div
+                        class="onboard-progress"
+                        style:display=move || if !ready.get() && busy.get() { "flex" } else { "none" }
+                    >
+                        <div class="onboard-bar-track">
+                            <div
+                                class="onboard-bar-fill"
+                                style:width=move || format!("{}%", (onboard_progress.get() * 100.0).min(100.0))
+                            ></div>
+                        </div>
+                        <div class="onboard-steps">
+                            {move || {
+                                let steps = onboard_steps.get();
+                                if steps.is_empty() {
+                                    "Initializing\u{2026}".to_owned()
+                                } else {
+                                    steps.join(" · ")
+                                }
+                            }}
+                        </div>
+                    </div>
                     <div class="chat-history">
                         {move || {
                             let receive = receive_code.get();
