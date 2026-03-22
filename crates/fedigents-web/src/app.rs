@@ -573,6 +573,7 @@ pub fn App() -> impl IntoView {
     let rec_drag_x = RwSignal::new(0.0_f64);
     let rec_start_x = RwSignal::new(0.0_f64);
     let rec_cancelled = RwSignal::new(false);
+    let rec_bar_ref = NodeRef::<leptos::html::Div>::new();
     let scan_submit = Rc::clone(&submit_prompt);
     let form_submit = Rc::clone(&submit_prompt);
     let key_submit = Rc::clone(&submit_prompt);
@@ -937,6 +938,16 @@ pub fn App() -> impl IntoView {
                                 rec_drag_x.set(0.0);
                                 rec_cancelled.set(false);
                                 recording.set(true);
+                                // Capture the pointer on the recording-bar so
+                                // pointerup/pointermove fire there even though
+                                // the original target (mic-button) will be
+                                // hidden.  Without this, mobile browsers either
+                                // swallow the pointerup or fire pointercancel
+                                // when the touch target disappears.
+                                if let Some(bar) = rec_bar_ref.get_untracked() {
+                                    let el: &web_sys::Element = &bar;
+                                    let _ = el.set_pointer_capture(ev.pointer_id());
+                                }
                                 spawn_local(async move {
                                     if let Err(e) = browser::begin_recording().await {
                                         leptos::logging::warn!("Failed to start recording: {e}");
@@ -954,6 +965,7 @@ pub fn App() -> impl IntoView {
                         </button>
                     </form>
                     <div
+                        node_ref=rec_bar_ref
                         class="recording-bar"
                         class:over-trash=move || rec_drag_x.get() < -30.0
                         style:display=move || if recording.get() { "flex" } else { "none" }
